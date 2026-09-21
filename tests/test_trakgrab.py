@@ -326,8 +326,13 @@ class TestResolveArtistInput:
 
 
 class TestVersion:
-    def test_the_banner_and_pyproject_do_not_drift(self):
-        """The printed banner should agree with the packaged major.minor."""
+    def test_the_banner_agrees_with_the_packaged_version(self):
+        """The printed banner must not name a different release than pyproject.
+
+        semantic-release bumps pyproject automatically, so the test derives
+        the expected banner from the file instead of pinning a number that
+        every release would break.
+        """
         # tomllib is 3.11+; the 3.10 floor takes the backport.
         try:
             import tomllib
@@ -336,4 +341,19 @@ class TestVersion:
 
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
-        assert version.split(".")[:2] == ["2", "2"]
+        assert f"trakGrab v{version.rsplit('.', 1)[0]}" in _main_banner()
+
+
+def _main_banner() -> str:
+    """Capture what main() prints before asking for input."""
+    import io
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        try:
+            # No input is reached: the banner prints first, then input raises.
+            trakGrab.main()
+        except (KeyboardInterrupt, EOFError, OSError, SystemExit):
+            pass
+    return buffer.getvalue()
