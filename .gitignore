@@ -16,6 +16,9 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
+# Local release notes (release content lives on GitHub, not in the repo)
+.release-notes.md
+
 # Editors / OS
 .vscode/
 .idea/

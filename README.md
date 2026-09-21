@@ -6,7 +6,9 @@ profile — with pagination support, resumable re-runs and Windows-safe
 filenames.
 
 > **Status:** personal project, tested on Windows with Python 3.14 against
-> traktrain.com's September 2026 markup. Contributions are welcome.
+> traktrain.com's September 2026 markup. CI runs the offline test suite on
+> every push, and releases are cut automatically from Conventional Commits
+> (with wheels attached). Contributions are welcome.
 
 ---
 
@@ -19,9 +21,14 @@ filenames.
 - Downloads every free preview MP3 from traktrain's CDN (`*.cloudfront.net`),
   which only serves files with a proper `Referer` header
 - Never overwrites: re-runs skip tracks that are already downloaded, so an
-  interrupted or repeated run simply picks up where it left off
+  interrupted or repeated run simply picks up where it left off. Failed
+  downloads never leave a partial file behind, so a broken attempt cannot
+  pose as "already fetched"
 - Alternatively downloads a single track by name (case-insensitive, with
   substring matching and a listing of available tracks on a miss)
+- Accepts a bare artist slug, a full profile URL, or an input with stray
+  slashes; track names that collide with Windows reserved device names
+  (CON, COM1, LPT1, ...) are saved with an underscore prefix
 
 ## Quick start
 
@@ -92,12 +99,33 @@ this account; `lxml` parses the markup.
 ```text
 traktrain-downloader/
 ├── trakGrab.py          # The whole tool: scraping, pagination, downloads
+├── tests/               # Offline pytest suite (never touches the network)
 ├── pyproject.toml       # Packaging metadata; `pip install .` gives `trakgrab`
 ├── requirements.txt     # Runtime dependencies (httpx[http2], lxml)
 ├── LICENSE              # GPLv3
+├── .github/workflows/   # CI, auto-release (Conventional Commits), release build
 ├── .gitignore
 └── songs/               # Downloaded beats (ignored by git)
 ```
+
+## Tests
+
+The suite is fully offline — it never touches traktrain.com — so CI passes
+without network access:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install ".[dev]"
+python -m pytest
+```
+
+## Releases
+
+Releases are driven by Conventional Commits on `main` via
+python-semantic-release: a `fix:` bumps the patch version, `feat:` the minor
+version, and a `BREAKING CHANGE:` footer the major version; other commit
+types release nothing. Every tagged release is built by Actions and gets its
+sdist and wheel attached.
 
 ## License
 
