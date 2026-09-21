@@ -19,8 +19,7 @@ from bs4 import BeautifulSoup
 
 TRAKTRAIN = "https://traktrain.com/"
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 )
 PAGE_CAP = 100  # safety cap for pagination
 CHUNK = 64 * 1024  # download chunk size
@@ -28,7 +27,9 @@ MAX_NAME_LEN = 180  # keep filenames well under Windows' 255-char limit
 
 BASE_URL_RE = re.compile(r"var\s+AWS_BASE_URL\s*=\s*'([^']+)'")
 PROFILE_TRACKS_RE = re.compile(r"/profile-tracks/(\d+)")
-ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Tab is deliberately excluded so the whitespace collapse below can turn it
+# into a space instead of gluing words together.
+ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x08\x0b-\x1f]')
 
 
 def fetch(url: str, *, ajax: bool = False) -> bytes:
@@ -135,13 +136,11 @@ def pick_song(tracks: list[dict], wanted: str) -> dict | None:
     """Case-insensitive match on title or 'artist - title': exact, then substring."""
     wanted_low = wanted.casefold().strip()
     for track in tracks:
-        titles = {str(track.get("name", "")).strip().casefold(),
-                  display_name(track).casefold()}
+        titles = {str(track.get("name", "")).strip().casefold(), display_name(track).casefold()}
         if wanted_low in titles:
             return track
     for track in tracks:
-        if (wanted_low in str(track.get("name", "")).casefold()
-                or wanted_low in display_name(track).casefold()):
+        if wanted_low in str(track.get("name", "")).casefold() or wanted_low in display_name(track).casefold():
             return track
     return None
 
@@ -250,9 +249,7 @@ def main() -> None:
 
     print(f"Connected! Found {len(tracks)} track(s).\n")
 
-    out_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "songs", artist
-    )
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", artist)
     os.makedirs(out_dir, exist_ok=True)
 
     if wanted != "*":
@@ -269,8 +266,7 @@ def main() -> None:
             print(f"[{i}/{len(tracks)}] {display_name(track)}")
             stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
         print(
-            f"\nDone! {stats['downloaded']} downloaded, "
-            f"{stats['skipped']} already existed, {stats['failed']} failed."
+            f"\nDone! {stats['downloaded']} downloaded, {stats['skipped']} already existed, {stats['failed']} failed."
         )
     print(f"Saved to: {out_dir}")
 

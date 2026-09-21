@@ -34,8 +34,54 @@ dependencies = [
 Homepage = "https://github.com/Nawid3333/traktrain-downloader"
 Issues = "https://github.com/Nawid3333/traktrain-downloader/issues"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
+
 [project.scripts]
-trakgrab = "trakgrab:main"
+trakgrab = "trakGrab:main"
 
 [tool.setuptools]
 py-modules = ["trakGrab"]
+
+# ==================== RELEASE AUTOMATION ====================
+# Version is bumped automatically by python-semantic-release, driven by
+# Conventional Commits (feat:/fix:/BREAKING CHANGE) on every push to
+# main -- see .github/workflows/auto-release.yml. Don't bump `version`
+# above by hand; the next automated run will just move it again.
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+commit_message = "chore(release): {version}"
+commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+
+# ==================== TESTS ====================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+
+[tool.pyright]
+include = ["trakGrab.py"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "build", "dist", ".venv"]
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+
+# Ruff configuration for trakGrab
+[tool.ruff]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "native"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+]

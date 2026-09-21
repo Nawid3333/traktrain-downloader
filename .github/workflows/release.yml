@@ -1,0 +1,97 @@
+# Builds the package when a release is published and attaches the sdist and
+# wheel to that release, so people can install a build without cloning.
+#
+# Runs on windows-latest because that is the only platform this tool has ever
+# been run on. The wheel is pure Python, so the artifact is identical wherever
+# it is built -- the runner choice only affects whether the tests pass.
+# Switch to ubuntu-latest (faster) once the tool has been confirmed on Linux.
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Also runnable by hand from the Actions tab, to check the build without
+  # cutting a release. That run uploads the artifacts to the run itself.
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to upload assets onto the release
+
+jobs:
+  package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        # bash on Windows too: the upload step relies on glob expansion, which
+        # PowerShell does not do for arguments to external commands.
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # The floor declared in requires-python, deliberately: testing the
+          # oldest supported version is what catches a newer-only API slipping
+          # in.
+          python-version: "3.10"
+          cache: pip
+
+      - name: Verify the tag matches the package version
+        # The failure this exists for: pyproject.toml and the git tag drifting
+        # apart, so a release built from it would attach files named like the
+        # wrong version. Checked before anything is built or uploaded, so a
+        # mismatched release fails loudly instead of shipping misnamed
+        # packages. Skipped on manual runs, which have no tag to check.
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tag_version="${TAG#v}"
+
+          if [ -z "$tag_version" ]; then
+            echo "::error::No tag name reached this step, so nothing can be checked against it."
+            echo "Refusing to build a release blind."
+            exit 1
+          fi
+
+          pkg_version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag $TAG declares $tag_version but pyproject.toml says $pkg_version"
+            echo "This release would attach packages named $pkg_version, not $tag_version."
+            echo "Bump version in pyproject.toml (and the wheel name in README.md) to $tag_version, push, then delete and re-create the tag."
+            exit 1
+          fi
+          echo "tag $TAG matches pyproject.toml version $pkg_version"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ".[dev]" build twine
+
+      - name: Test
+        # The suite is offline by design: it never touches traktrain.com. A
+        # release should not be built from a tree that is failing.
+        run: python -m pytest
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check package metadata
+        run: twine check dist/*
+
+      - name: Attach artifacts to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --clobber so re-running the workflow on the same release replaces
+        # the assets instead of failing on the second attempt.
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+
+      - name: Keep artifacts on a manual run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
