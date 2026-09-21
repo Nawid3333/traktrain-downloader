@@ -144,6 +144,13 @@ class TestSanitize:
     def test_an_empty_name_falls_back_to_untitled(self):
         assert trakGrab.sanitize("") == "untitled"
 
+    def test_a_dot_only_name_falls_back_to_untitled(self):
+        """Dots are stripped, so '..' has no usable stem left."""
+        assert trakGrab.sanitize("..") == "untitled"
+
+    def test_unicode_survives_sanitization(self):
+        assert trakGrab.sanitize("café del mar") == "café del mar"
+
 
 class TestSafeFilename:
     """The Windows reserved-name guard and collision handling in one place."""
@@ -173,6 +180,79 @@ class TestUniquePath:
         (tmp_path / "a.mp3").write_bytes(b"x")
         (tmp_path / "a (1).mp3").write_bytes(b"x")
         assert trakGrab.unique_path(tmp_path, "a.mp3") == tmp_path / "a (2).mp3"
+
+
+class TestTrackMarkers:
+    """Bookkeeping that distinguishes two tracks sharing one title."""
+
+    def test_a_fresh_download_writes_a_marker(self, tmp_path):
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        trakGrab._remember_track(dest, 1669133, "78923/a.mp3")
+        marker = trakGrab._marker_path(dest)
+        assert marker.exists()
+        assert marker.read_text(encoding="utf-8") == "1669133|78923/a.mp3"
+
+    def test_same_track_recognized_by_marker(self, tmp_path):
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        trakGrab._remember_track(dest, 1669133, "78923/a.mp3")
+        assert trakGrab._same_track(dest, 1669133, "78923/a.mp3") is True
+
+    def test_different_track_not_recognized(self, tmp_path):
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        trakGrab._remember_track(dest, 1669133, "78923/a.mp3")
+        assert trakGrab._same_track(dest, 9999999, "78923/b.mp3") is False
+
+    def test_a_markerless_file_is_treated_conservatively(self, tmp_path):
+        """Pre-bookkeeping or hand-placed files are never overwritten."""
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        assert trakGrab._same_track(dest, 1, "x/y.mp3") is True
+
+    def test_an_unreadable_marker_is_treated_conservatively(self, tmp_path):
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        marker = trakGrab._marker_path(dest)
+        marker.write_bytes(b"\xff\xfe\x00bad")
+        assert trakGrab._same_track(dest, 1, "x/y.mp3") is True
+
+    def test_grab_skips_a_same_title_track_of_the_same_id(self, tmp_path):
+        """Re-running with the marker present still counts as skipped."""
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        trakGrab._remember_track(dest, 1669133, "78923/a.mp3")
+        track = {"id": 1669133, "src": "78923/a.mp3", "name": "hit", "artist": "mel"}
+        assert trakGrab.grab("https://cdn/", track, tmp_path, skip_existing=True) == "skipped"
+
+    def test_grab_renames_a_same_title_track_with_a_different_id(self, tmp_path, monkeypatch):
+        """Two distinct tracks sharing a title must not collapse into one."""
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"old bytes")
+        trakGrab._remember_track(dest, 111, "78923/old.mp3")
+
+        track = {"id": 222, "src": "78923/new.mp3", "name": "hit", "artist": "mel"}
+
+        # Signature matches trakGrab.download; the URL argument is unused.
+        downloaded_to: list[str] = []
+
+        def fake_download(url: str, target) -> bool:
+            downloaded_to.append(url)
+            target.write_bytes(b"new bytes")  # pretend the fetch worked
+            return True
+
+        monkeypatch.setattr(trakGrab, "download", fake_download)
+        assert trakGrab.grab("https://cdn/", track, tmp_path, skip_existing=True) == "downloaded"
+        assert downloaded_to  # the fetch was attempted for the renamed path
+
+        # The original file is untouched; the new track went to a suffix path
+        # with its own marker.
+        assert dest.read_bytes() == b"old bytes"
+        renamed = tmp_path / "mel - hit (1).mp3"
+        assert renamed.read_bytes() == b"new bytes"
+        assert trakGrab._same_track(renamed, 222, "78923/new.mp3") is True
+        assert trakGrab._same_track(dest, 222, "78923/new.mp3") is False
 
 
 class TestDedupe:

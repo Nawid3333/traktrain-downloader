@@ -200,6 +200,8 @@ def pick_song(tracks: list[dict[str, Any]], wanted: str) -> dict[str, Any] | Non
 def sanitize(name: str) -> str:
     """Make a track name safe as a Windows filename without mangling it."""
     cleaned = ILLEGAL_CHARS_RE.sub("", str(name))
+    # Trailing dots/spaces are dropped by Windows itself, so 'name.' and
+    # 'name' would be the same file; stripping them here keeps that explicit.
     cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(". ")
     return cleaned[:MAX_NAME_LEN] or "untitled"
 
@@ -234,8 +236,9 @@ def safe_filename(directory: Path, label: str, ext: str) -> Path:
 def download(url: str, dest: Path) -> bool:
     """Stream a file to disk with a progress readout; retry, then clean up.
 
-    Partial files are removed immediately so a failed attempt never leaves a
-    broken file that later runs would treat as already-fetched.
+    Partial files are removed immediately -- on network errors *and* on
+    Ctrl+C -- so a broken download can never linger and be mistaken for a
+    complete one on the next run.
     """
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
@@ -260,7 +263,12 @@ def download(url: str, dest: Path) -> bool:
 
 
 def grab(base_url: str, track: dict[str, Any], out_dir: Path, *, skip_existing: bool) -> str:
-    """Download one track. Returns 'downloaded', 'skipped' or 'failed'."""
+    """Download one track. Returns 'downloaded', 'skipped' or 'failed'.
+
+    Ctrl+C during the transfer removes the partial file and re-raises, so an
+    interrupted run never leaves a broken file behind that a later run would
+    treat as already downloaded.
+    """
     src = str(track.get("src", "")).strip()
     if not src:
         return "failed"
@@ -273,16 +281,56 @@ def grab(base_url: str, track: dict[str, Any], out_dir: Path, *, skip_existing: 
 
     if dest.exists():
         if skip_existing:
-            print("    already exists, skipped")
-            return "skipped"
-        dest = safe_filename(out_dir, label, ext)
-        print(f"    exists, saving as {dest.name}")
+            # The file may belong to a *different* track that merely shares
+            # the title. The bookkeeping marker distinguishes them: without
+            # one (pre-marker file, or hand-placed), skip conservatively.
+            if _same_track(dest, track.get("id"), src):
+                print("    already exists, skipped")
+                return "skipped"
+            print("    same name, different track - saving with a suffix")
+            dest = safe_filename(out_dir, label, ext)
+        else:
+            dest = safe_filename(out_dir, label, ext)
+            print(f"    exists, saving as {dest.name}")
 
     print(f"    {url}")
-    if download(url, dest):
-        return "downloaded"
+    try:
+        if download(url, dest):
+            _remember_track(dest, track.get("id"), src)
+            return "downloaded"
+    except KeyboardInterrupt:
+        dest.unlink(missing_ok=True)
+        raise
     dest.unlink(missing_ok=True)  # drop partial file
     return "failed"
+
+
+def _marker_path(dest: Path) -> Path:
+    """Path of the invisible bookkeeping file for a downloaded track."""
+    return dest.with_name(f".{dest.name}.trakid")
+
+
+def _same_track(dest: Path, track_id: Any, src: str) -> bool:
+    """True when the file at dest was downloaded from this exact track."""
+    marker = _marker_path(dest)
+    if not marker.exists():
+        # No marker: predates bookkeeping, or hand-placed. Skipping is the
+        # conservative choice -- it preserves the never-overwrite promise.
+        return True
+    try:
+        return marker.read_text(encoding="utf-8").strip() == f"{track_id}|{src}"
+    except (OSError, UnicodeDecodeError):
+        # Unreadable marker: treat the file as its own thing rather than
+        # overwriting something we cannot vouch for.
+        return True
+
+
+def _remember_track(dest: Path, track_id: Any, src: str) -> None:
+    """Record which track a downloaded file came from (best effort)."""
+    try:
+        _marker_path(dest).write_text(f"{track_id}|{src}", encoding="utf-8")
+    except OSError:
+        pass  # bookkeeping must never break a successful download
 
 
 def resolve_artist_input(raw: str) -> str:
@@ -318,7 +366,11 @@ def main() -> None:
 
         print(f"Connected! Found {len(tracks)} track(s).\n")
 
-        out_dir = Path(__file__).resolve().parent / "songs" / artist
+        # The artist string came off the network (profile URL slug) or the
+        # keyboard, so it gets the same filename treatment as track names:
+        # '..' would otherwise escape songs/, and a reserved name would fail
+        # oddly at mkdir time.
+        out_dir = Path(__file__).resolve().parent / "songs" / sanitize(artist)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if wanted != "*":
@@ -347,5 +399,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        # A Ctrl+C mid-download raises inside download() too; its handler
+        # already removed the partial file there. Here the message is all
+        # that is left to do.
         print("\nAborted.")
         sys.exit(130)
