@@ -1,0 +1,27 @@
+# Dependabot configuration for pip dependencies.
+# Enables weekly dependency update PRs for the root requirements.txt.
+#
+# Note: You must also enable Dependabot in the repository settings
+# (Settings > Code security > Dependabot alerts/version updates).
+version: 2
+updates:
+  - package-ecosystem: 'pip'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 10
+    labels:
+      - 'dependencies'
+
+  # Workflow actions pin a major tag, so v7.x fixes arrive on their own but a
+  # new major never does. Without this the pins simply rot: checkout and
+  # setup-python sat three majors behind until a Node 20 deprecation warning
+  # made it visible. Dependabot opens a PR when v8 lands, which is a decision
+  # rather than a surprise.
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 5
+    labels:
+      - 'dependencies'
