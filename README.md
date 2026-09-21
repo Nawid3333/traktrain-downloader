@@ -1,44 +1,112 @@
-## trakGrab
+# trakGrab
 
-trakGrab is a Python 3 script that downloads the free preview MP3s of
-every published track on a traktrain.com producer profile.
-Works on Windows, macOS and Linux.
+A small, terminal-driven Python tool that downloads the free preview MP3s of
+every published track on a [traktrain.com](https://traktrain.com) producer
+profile — with pagination support, resumable re-runs and Windows-safe
+filenames.
 
-__DEPENDENCIES__
+> **Status:** personal project, tested on Windows with Python 3.14 against
+> traktrain.com's September 2026 markup. Contributions are welcome.
 
-- Python 3.10+ (uses stdlib + BeautifulSoup only)
-- BeautifulSoup 4 — install via `python -m pip install beautifulsoup4`
+---
 
-__USAGE__
+## What it does
 
-Simply run the script from the command line with `py trakGrab.py`.
-The script prompts the user for an artist (their traktrain URL) and for
-a beat to download. The wildcard character (`*`) can be used to download
-all of an artist's available beats. A full profile URL like
-`https://traktrain.com/uq` is accepted as artist input as well.
+- Scrapes a producer profile (`traktrain.com/<artist>`) and extracts every
+  track's metadata from the page's embedded `data-player-info` JSON
+- Follows profile pagination (`/profile-tracks/<id>?page=N`) so artists with
+  more tracks than fit on one page are scraped completely
+- Downloads every free preview MP3 from traktrain's CDN (`*.cloudfront.net`),
+  which only serves files with a proper `Referer` header
+- Never overwrites: re-runs skip tracks that are already downloaded, so an
+  interrupted or repeated run simply picks up where it left off
+- Alternatively downloads a single track by name (case-insensitive, with
+  substring matching and a listing of available tracks on a miss)
 
-Beats are downloaded to `$PWD\songs\artistName\songName.mp3` where `$PWD`
-is the location of the script. Existing files are never overwritten:
-re-runs skip tracks that are already downloaded ("modded against double
-naming" behavior kept and improved).
+## Quick start
 
-__WHAT CHANGED IN v2.0__
+### 1. Clone and install dependencies
 
-- traktrain.com moved its track metadata into `data-player-info` JSON
-  attributes whose first key is no longer `name`; the old regex- and
-  string-splitting parsing failed on it. trakGrab now parses the
-  attribute as real JSON via BeautifulSoup.
-- Switched from `http://www.traktrain.com` to `https://traktrain.com`.
-- Follows profile pagination (`/profile-tracks/<id>?page=N`) so artists
-  with more tracks than fit on the first page are fully scraped.
-- The CDN (`*.cloudfront.net`) only serves files with a `Referer` header
-  of `https://traktrain.com/`; this is set on every request.
-- Updated the User-Agent to a current Chrome version.
-- Downloads stream in 64 KB chunks with a progress readout and are
-  retried up to 3 times on network errors; partial files are removed.
-- Track names are sanitized for Windows-illegal characters and long
-  names are truncated, keeping the (1)/(2) collision suffixes.
+```bash
+git clone https://github.com/Nawid3333/traktrain-downloader
+cd traktrain-downloader
+python -m pip install -r requirements.txt
+```
 
-No rights reserved.
+### 2. Run it
 
-##### -dg 12.11.19 / -ns 07.08.24 / modernized 09.2026
+```bash
+python trakGrab.py
+```
+
+The script prompts for an artist (the part after `traktrain.com/`, or a full
+profile URL like `https://traktrain.com/uq`) and for a song. The wildcard
+character (`*`) downloads all of the artist's available beats.
+
+### 3. Optional: install it as a command
+
+The project builds as a wheel and installs a `trakgrab` command:
+
+```bash
+pip install .
+trakgrab
+```
+
+### Output
+
+Beats land in `songs/<artist>/<track name>.mp3` next to the script, with
+`(1)`, `(2)` suffixes on the rare name collisions.
+
+## How it works
+
+```
+trakGrab.py ── GET https://traktrain.com/<artist> (browser User-Agent)
+       │
+       ├─ var AWS_BASE_URL  ──►  CDN base URL (cloudfront)
+       ├─ div[data-player-info]  ──►  JSON: name, src, id, bpm, …
+       └─ /profile-tracks/<id>?page=N  ──►  more pages of the same
+                │
+                ▼
+     GET <AWS_BASE_URL>/<src>   Referer: https://traktrain.com/
+                │
+                ▼
+     songs/<artist>/<sanitized track name>.mp3
+```
+
+The parsing deliberately uses BeautifulSoup + `json.loads` on the
+`data-player-info` attribute instead of string splitting: traktrain changed
+the JSON's key order at some point (the first key is `prices` now, not
+`name`), which silently broke regex-based scrapers.
+
+## Project layout
+
+```text
+traktrain-downloader/
+├── trakGrab.py          # The whole tool: scraping, pagination, downloads
+├── pyproject.toml       # Packaging metadata; `pip install .` gives `trakgrab`
+├── requirements.txt     # Runtime dependencies (beautifulsoup4)
+├── LICENSE              # GPLv3
+├── .gitignore
+└── songs/               # Downloaded beats (ignored by git)
+```
+
+## License
+
+This project is licensed under the **GNU General Public License v3.0 or
+later** — the same license used for the rest of this repository's Python
+tools. See [LICENSE](LICENSE) for the full text.
+
+---
+
+## Roadmap / known limitations
+
+- Downloads the free 128 kbps preview streams, not the purchased files —
+  bought tracks require an account and are intentionally out of scope.
+- A producer's non-first pages are fetched one by one; there is no parallelism
+  (deliberately gentle on traktrain's servers).
+- Drum kits and other non-audio products are not scraped; only tracks with an
+  MP3/preview `src` are listed.
+
+---
+
+Happy beat hunting! 🎧

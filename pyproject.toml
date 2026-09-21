@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trakgrab"
+version = "2.0.0"
+description = "Download the free preview MP3s of every published track on a traktrain.com producer profile"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Nawid Salehie" }]
+keywords = ["traktrain", "beats", "downloader", "scraper", "music", "mp3"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+    "beautifulsoup4>=4.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/Nawid3333/traktrain-downloader"
+Issues = "https://github.com/Nawid3333/traktrain-downloader/issues"
+
+[project.scripts]
+trakgrab = "trakgrab:main"
+
+[tool.setuptools]
+py-modules = ["trakGrab"]

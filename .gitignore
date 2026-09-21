@@ -1,9 +1,25 @@
-# downloaded beats
+# Downloaded beats
 songs/
 
-# python
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
 
-# editors
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors / OS
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env files never get committed
+.env
