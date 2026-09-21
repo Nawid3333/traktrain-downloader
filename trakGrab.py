@@ -11,11 +11,10 @@ import os
 import re
 import sys
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
 
-from bs4 import BeautifulSoup
+import httpx
+from lxml import html as lxml_html
 
 TRAKTRAIN = "https://traktrain.com/"
 USER_AGENT = (
@@ -31,26 +30,47 @@ PROFILE_TRACKS_RE = re.compile(r"/profile-tracks/(\d+)")
 # into a space instead of gluing words together.
 ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x08\x0b-\x1f]')
 
+# One httpx client for the whole run: connection reuse against the site and
+# the CDN, HTTP/2 where CloudFront offers it, browser-like default headers.
+# The CDN refuses requests without the Referer, so it is set globally.
+_client: httpx.Client | None = None
 
-def fetch(url: str, *, ajax: bool = False) -> bytes:
-    """GET a URL with browser-like headers; return the raw response bytes."""
-    headers = {"User-Agent": USER_AGENT, "Referer": TRAKTRAIN}
-    if ajax:
-        headers["X-Requested-With"] = "XMLHttpRequest"
-    with urlopen(Request(url, headers=headers), timeout=60) as resp:
-        return resp.read()
+
+def get_client() -> httpx.Client:
+    """Return the shared client, creating it on first use."""
+    global _client
+    if _client is None:
+        _client = httpx.Client(
+            headers={"User-Agent": USER_AGENT, "Referer": TRAKTRAIN},
+            timeout=60,
+            follow_redirects=True,
+            http2=True,
+        )
+    return _client
+
+
+def close_client() -> None:
+    """Close the shared client; safe to call more than once."""
+    global _client
+    if _client is not None:
+        _client.close()
+        _client = None
 
 
 def fetch_text(url: str, *, ajax: bool = False) -> str:
-    return fetch(url, ajax=ajax).decode("utf-8", errors="replace")
+    """GET a URL and return the decoded body, raising on HTTP errors."""
+    headers = {"X-Requested-With": "XMLHttpRequest"} if ajax else None
+    resp = get_client().get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.text
 
 
 def parse_tracks(html: str) -> list[dict]:
     """Extract every track's JSON payload from data-player-info attributes."""
-    soup = BeautifulSoup(html, "html.parser")
+    tree = lxml_html.fromstring(html)
     tracks: list[dict] = []
-    for node in soup.find_all(attrs={"data-player-info": True}):
-        raw = node["data-player-info"]
+    for node in tree.xpath("//*[@data-player-info]"):
+        raw = node.get("data-player-info")
         try:
             info = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -97,7 +117,7 @@ def paginate(first_page_html: str) -> list[dict]:
         try:
             payload = json.loads(fetch_text(url, ajax=True))
             content = payload.get("content", "") if isinstance(payload, dict) else ""
-        except (json.JSONDecodeError, HTTPError, URLError):
+        except (json.JSONDecodeError, httpx.HTTPError):
             break
         page_tracks = parse_tracks(content)
         if not page_tracks:
@@ -165,28 +185,21 @@ def unique_path(directory: str, filename: str) -> str:
 
 def download(url: str, dest: str) -> bool:
     """Stream a file to disk with a progress readout; retry up to 3 times."""
-    headers = {"User-Agent": USER_AGENT, "Referer": TRAKTRAIN}
     for attempt in range(1, 4):
         try:
-            with urlopen(Request(url, headers=headers), timeout=120) as resp:
+            with get_client().stream("GET", url, timeout=120) as resp:
+                resp.raise_for_status()
                 total = int(resp.headers.get("Content-Length") or 0)
                 done = 0
                 with open(dest, "wb") as out:
-                    while True:
-                        chunk = resp.read(CHUNK)
-                        if not chunk:
-                            break
+                    for chunk in resp.iter_bytes(CHUNK):
                         out.write(chunk)
                         done += len(chunk)
                         if total:
-                            print(
-                                f"\r    {done * 100 // total:3d}% of {total} bytes",
-                                end="",
-                                flush=True,
-                            )
+                            print(f"\r    {done * 100 // total:3d}% of {total} bytes", end="", flush=True)
             print()
             return True
-        except (HTTPError, URLError, OSError) as exc:
+        except (httpx.HTTPError, OSError) as exc:
             print(f"\n    attempt {attempt}/3 failed: {exc}")
             time.sleep(attempt)
     return False
@@ -225,50 +238,54 @@ def grab(base_url: str, track: dict, out_dir: str, *, skip_existing: bool) -> st
 
 
 def main() -> None:
-    print("trakGrab v2.1 - downloads free previews from traktrain.com\n")
-    artist = input("What is the artist name? traktrain.com/").strip()
-    url_match = re.search(r"traktrain\.com/([^/?#\s]+)", artist, re.IGNORECASE)
-    if url_match:  # accept a full profile URL as input, too
-        artist = url_match.group(1)
-    if not artist:
-        sys.exit("No artist given.")
-    wanted = input("Which song? (* for all) ").strip() or "*"
-
-    print("\nConnecting...")
     try:
-        base_url, tracks = scrape_artist(artist)
-    except HTTPError as exc:
-        if exc.code == 404:
-            sys.exit(f"Artist '{artist}' not found on traktrain.com.")
-        sys.exit(f"traktrain returned HTTP {exc.code}.")
-    except URLError as exc:
-        sys.exit(f"Connection failed: {exc.reason}")
+        print("trakGrab - downloads free previews from traktrain.com\n")
+        artist = input("What is the artist name? traktrain.com/").strip()
+        url_match = re.search(r"traktrain\.com/([^/?#\s]+)", artist, re.IGNORECASE)
+        if url_match:  # accept a full profile URL as input, too
+            artist = url_match.group(1)
+        if not artist:
+            sys.exit("No artist given.")
+        wanted = input("Which song? (* for all) ").strip() or "*"
 
-    if not tracks:
-        sys.exit(f"No tracks found for '{artist}'.")
+        print("\nConnecting...")
+        try:
+            base_url, tracks = scrape_artist(artist)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                sys.exit(f"Artist '{artist}' not found on traktrain.com.")
+            sys.exit(f"traktrain returned HTTP {exc.response.status_code}.")
+        except httpx.HTTPError as exc:
+            sys.exit(f"Connection failed: {exc}")
 
-    print(f"Connected! Found {len(tracks)} track(s).\n")
+        if not tracks:
+            sys.exit(f"No tracks found for '{artist}'.")
 
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", artist)
-    os.makedirs(out_dir, exist_ok=True)
+        print(f"Connected! Found {len(tracks)} track(s).\n")
 
-    if wanted != "*":
-        track = pick_song(tracks, wanted)
-        if track is None:
-            print(f"Song '{wanted}' not found. Available tracks:")
-            for t in tracks:
-                print("  -", display_name(t))
-            sys.exit(1)
-        grab(base_url, track, out_dir, skip_existing=False)
-    else:
-        stats = {"downloaded": 0, "skipped": 0, "failed": 0}
-        for i, track in enumerate(tracks, 1):
-            print(f"[{i}/{len(tracks)}] {display_name(track)}")
-            stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
-        print(
-            f"\nDone! {stats['downloaded']} downloaded, {stats['skipped']} already existed, {stats['failed']} failed."
-        )
-    print(f"Saved to: {out_dir}")
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", artist)
+        os.makedirs(out_dir, exist_ok=True)
+
+        if wanted != "*":
+            track = pick_song(tracks, wanted)
+            if track is None:
+                print(f"Song '{wanted}' not found. Available tracks:")
+                for t in tracks:
+                    print("  -", display_name(t))
+                sys.exit(1)
+            grab(base_url, track, out_dir, skip_existing=False)
+        else:
+            stats = {"downloaded": 0, "skipped": 0, "failed": 0}
+            for i, track in enumerate(tracks, 1):
+                print(f"[{i}/{len(tracks)}] {display_name(track)}")
+                stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
+            print(
+                f"\nDone! {stats['downloaded']} downloaded, {stats['skipped']} already existed,"
+                f" {stats['failed']} failed."
+            )
+        print(f"Saved to: {out_dir}")
+    finally:
+        close_client()
 
 
 if __name__ == "__main__":

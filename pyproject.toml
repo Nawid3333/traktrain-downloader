@@ -27,7 +27,8 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
 ]
 dependencies = [
-    "beautifulsoup4>=4.12",
+    "httpx[http2]>=0.28.1",
+    "lxml>=6.1.3",
 ]
 
 [project.urls]

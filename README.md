@@ -75,13 +75,17 @@ trakGrab.py ── GET https://traktrain.com/<artist> (browser User-Agent)
      songs/<artist>/<artist> - <sanitized track name>.mp3
 ```
 
-The parsing deliberately uses BeautifulSoup + `json.loads` on the
+The parsing deliberately uses lxml + `json.loads` on the
 `data-player-info` attribute instead of string splitting: traktrain changed
 the JSON's key order at some point (the first key is `prices` now, not
 `name`), which silently broke regex-based scrapers. The artist display name
-lives only in the same div's `data-name="<artist> - <track>"` attribute —
-the JSON payload itself carries just the producer link — and is used to
+lives only in the same div's `data-name="<artist> - <track>"` attribute --
+the JSON payload itself carries just the producer link -- and is used to
 prefix every file name.
+
+HTTP is handled by `httpx` with HTTP/2 enabled (connection reuse across the
+profile pages and the CDN), matching the stack of the other Python tools in
+this account; `lxml` parses the markup.
 
 ## Project layout
 
@@ -89,7 +93,7 @@ prefix every file name.
 traktrain-downloader/
 ├── trakGrab.py          # The whole tool: scraping, pagination, downloads
 ├── pyproject.toml       # Packaging metadata; `pip install .` gives `trakgrab`
-├── requirements.txt     # Runtime dependencies (beautifulsoup4)
+├── requirements.txt     # Runtime dependencies (httpx[http2], lxml)
 ├── LICENSE              # GPLv3
 ├── .gitignore
 └── songs/               # Downloaded beats (ignored by git)
