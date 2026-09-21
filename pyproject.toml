@@ -33,7 +33,7 @@ Homepage = "https://github.com/Nawid3333/traktrain-downloader"
 Issues = "https://github.com/Nawid3333/traktrain-downloader/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff>=0.6.0", "tomli>=2.0.0; python_version < '3.11'"]
+dev = ["pytest>=8.0.0", "pytest-cov>=6.0.0", "pyright>=1.1.400", "ruff>=0.6.0", "tomli>=2.0.0; python_version < '3.11'", "respx>=0.22.0"]
 
 [project.scripts]
 trakgrab = "trakGrab:main"

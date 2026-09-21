@@ -40,6 +40,14 @@ jobs:
       - name: Lint
         run: python -m ruff check .
 
+      - name: Format
+        run: python -m ruff format --check .
+
+      - name: Type check
+        run: python -m pyright
+
       - name: Test
         # The suite is offline by design: it never touches traktrain.com.
-        run: python -m pytest
+        # trakGrab.py must stay at 100% coverage -- the report prints the
+        # table, and fail-under turns any regression into a red run.
+        run: python -m pytest --cov trakGrab --cov-report=term-missing --cov-fail-under=100

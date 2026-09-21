@@ -18,6 +18,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+
+from lxml.etree import ParserError  # noqa: E402
+
 import trakGrab  # noqa: E402
 
 
@@ -79,6 +82,27 @@ class TestParseTracks:
 
     def test_malformed_html_returns_empty_list(self):
         assert trakGrab.parse_tracks("<<<not html at all") == []
+
+    def test_content_lxml_cannot_parse_at_all_returns_empty_list(self, monkeypatch):
+        """The ParserError guard: lxml rejects the document outright."""
+
+        def raise_parser_error(_html):
+            raise ParserError("Document is empty")
+
+        monkeypatch.setattr(trakGrab.lxml_html, "fromstring", raise_parser_error)
+        assert trakGrab.parse_tracks("<div></div>") == []
+
+
+class TestClientLifecycle:
+    """The shared client is created lazily and closed exactly once."""
+
+    def test_the_client_is_recreated_after_close(self):
+        first = trakGrab.get_client()
+        trakGrab.close_client()
+        second = trakGrab.get_client()
+        assert first is not second
+        assert first.is_closed and not second.is_closed
+        trakGrab.close_client()
 
 
 class TestDisplayName:
@@ -217,6 +241,18 @@ class TestTrackMarkers:
         marker = trakGrab._marker_path(dest)
         marker.write_bytes(b"\xff\xfe\x00bad")
         assert trakGrab._same_track(dest, 1, "x/y.mp3") is True
+
+    def test_a_marker_write_failure_never_breaks_a_download(self, tmp_path, monkeypatch):
+        """Bookkeeping is best effort: a failed marker write is swallowed."""
+
+        def failing_write_text(self, _text, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(trakGrab.Path, "write_text", failing_write_text)
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(b"x")
+        # No exception escapes; the download result stands on its own.
+        trakGrab._remember_track(dest, 1, "x/y.mp3")
 
     def test_grab_skips_a_same_title_track_of_the_same_id(self, tmp_path):
         """Re-running with the marker present still counts as skipped."""

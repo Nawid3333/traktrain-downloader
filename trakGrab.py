@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 from lxml import html as lxml_html
+from lxml.etree import ParserError
 
 TRAKTRAIN = "https://traktrain.com/"
 USER_AGENT = (
@@ -88,7 +89,7 @@ def parse_tracks(html: str) -> list[dict[str, Any]]:
         return []
     try:
         tree = lxml_html.fromstring(html)
-    except lxml_html.ParserError:
+    except ParserError:
         return []
     tracks: list[dict[str, Any]] = []
     for node in tree.xpath("//*[@data-player-info]"):
@@ -395,7 +396,7 @@ def main() -> None:
         close_client()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - exercised by running the script
     try:
         main()
     except KeyboardInterrupt:
