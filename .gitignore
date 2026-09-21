@@ -1,0 +1,9 @@
+# downloaded beats
+songs/
+
+# python
+__pycache__/
+*.pyc
+
+# editors
+.vscode/

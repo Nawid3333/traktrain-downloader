@@ -1,96 +1,260 @@
+#!/usr/bin/env python3
 # trakGrab.py
-# Daniel Guilbert
-# 12.11.19 - 07.08.24
-# v1.1
+# Original by Daniel Guilbert, Nawid Salehie (12.11.19 - 07.08.24)
+# Modernized 2026 for the current traktrain.com markup (v2.0)
+#
+# Downloads the free preview MP3s of every published track on a
+# traktrain.com producer profile, following all pagination pages.
 
-from urllib.request import urlopen, URLError, Request
-from bs4 import BeautifulSoup
-import re
+import json
 import os
+import re
+import sys
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
-# Get information
-artist = input("What is the artist name? traktrain.com/")
-song = '*'  # input("Which song would you like to download? (* for all) ")
+from bs4 import BeautifulSoup
 
-print("Connecting...")
-# get aws server url
-urlmatch = re.compile('(.)*var AWS_BASE_URL(.)*')
-try:
-    req = Request("http://www.traktrain.com/" + artist)
-    req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36')
-    html = urlopen(req).read().decode('utf-8')
-except URLError:
-    input("That artist cannot be found, please try again.")
-    exit()
+TRAKTRAIN = "https://traktrain.com/"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+)
+PAGE_CAP = 100  # safety cap for pagination
+CHUNK = 64 * 1024  # download chunk size
+MAX_NAME_LEN = 180  # keep filenames well under Windows' 255-char limit
 
-print("Connected!\n")
-m = urlmatch.search(html)
-baseUrl = m.group().split("'")[1]
+BASE_URL_RE = re.compile(r"var\s+AWS_BASE_URL\s*=\s*'([^']+)'")
+PROFILE_TRACKS_RE = re.compile(r"/profile-tracks/(\d+)")
+ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-pwd = os.path.join(os.getcwd(), "songs", artist)
 
-if not os.path.exists(pwd):
-    os.makedirs(pwd)
+def fetch(url: str, *, ajax: bool = False) -> bytes:
+    """GET a URL with browser-like headers; return the raw response bytes."""
+    headers = {"User-Agent": USER_AGENT, "Referer": TRAKTRAIN}
+    if ajax:
+        headers["X-Requested-With"] = "XMLHttpRequest"
+    with urlopen(Request(url, headers=headers), timeout=60) as resp:
+        return resp.read()
 
-# if downloading single song
-if song != '*':
-    # find song metadata and create full URL to mp3
-    try:
-        songmatch = re.compile("(.)*data-player-info='{\"name\":\"" + song + "(.)*", re.I)
-        s = songmatch.search(html).group()
-        s = s.split("\"src\"")[1].split("\"")[1]
-        songUrl = baseUrl + s
-    except AttributeError:
-        print("That song could not be found, please try again.")
-        exit()
 
-    print("Downloading '" + song + "'")
-    # download file to $PWD\songs\{artist}\{song}.mp3
-    req = Request(songUrl)
-    req.add_header('Referer', 'https://traktrain.com/')  # traktrain blocks access unless this is set
+def fetch_text(url: str, *, ajax: bool = False) -> str:
+    return fetch(url, ajax=ajax).decode("utf-8", errors="replace")
 
-    song = re.sub(r'[^\w ]', '', song)
-    filename = song + ".mp3"
+
+def parse_tracks(html: str) -> list[dict]:
+    """Extract every track's JSON payload from data-player-info attributes."""
+    soup = BeautifulSoup(html, "html.parser")
+    tracks: list[dict] = []
+    for node in soup.find_all(attrs={"data-player-info": True}):
+        raw = node["data-player-info"]
+        try:
+            info = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue  # attribute misformatted; skip rather than crash
+        if isinstance(info, dict) and info.get("src"):
+            if not info.get("name"):
+                fallback = node.get("data-name")
+                if isinstance(fallback, str) and " - " in fallback:
+                    info["name"] = fallback.rsplit(" - ", 1)[-1]
+                elif isinstance(fallback, str):
+                    info["name"] = fallback
+            tracks.append(info)
+    return tracks
+
+
+def dedupe(tracks: list[dict]) -> list[dict]:
+    """Drop duplicate tracks (same id or same src)."""
+    seen: set[object] = set()
+    unique: list[dict] = []
+    for track in tracks:
+        key = track.get("id", track.get("src"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(track)
+    return unique
+
+
+def paginate(first_page_html: str) -> list[dict]:
+    """Follow the ?page=N pagination of a producer profile, if it has one."""
+    endpoint = PROFILE_TRACKS_RE.search(first_page_html)
+    if not endpoint:
+        return []
+    base = TRAKTRAIN.rstrip("/")
+    tracks: list[dict] = []
+    for page in range(2, PAGE_CAP + 1):
+        url = f"{base}{endpoint.group(0)}?page={page}"
+        try:
+            payload = json.loads(fetch_text(url, ajax=True))
+            content = payload.get("content", "") if isinstance(payload, dict) else ""
+        except (json.JSONDecodeError, HTTPError, URLError):
+            break
+        page_tracks = parse_tracks(content)
+        if not page_tracks:
+            break
+        tracks.extend(page_tracks)
+        print(f"  page {page}: {len(page_tracks)} more track(s)")
+    return tracks
+
+
+def extract_base_url(html: str) -> str:
+    """Read the CDN base URL (var AWS_BASE_URL) from the profile page."""
+    match = BASE_URL_RE.search(html)
+    if not match:
+        sys.exit("Could not find the CDN base URL on the profile page.")
+    return match.group(1)
+
+
+def scrape_artist(artist: str) -> tuple[str, list[dict]]:
+    """Return (CDN base URL, deduplicated track list) for a producer."""
+    html = fetch_text(TRAKTRAIN + quote(artist))
+    base_url = extract_base_url(html)
+    tracks = parse_tracks(html) + paginate(html)
+    return base_url, dedupe(tracks)
+
+
+def pick_song(tracks: list[dict], wanted: str) -> dict | None:
+    """Case-insensitive match: exact name first, then substring."""
+    wanted_low = wanted.casefold()
+    for track in tracks:
+        if str(track.get("name", "")).strip().casefold() == wanted_low:
+            return track
+    for track in tracks:
+        if wanted_low in str(track.get("name", "")).casefold():
+            return track
+    return None
+
+
+def sanitize(name: str) -> str:
+    """Make a track name safe as a Windows filename without mangling it."""
+    cleaned = ILLEGAL_CHARS_RE.sub("", str(name))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(". ")
+    return cleaned[:MAX_NAME_LEN] or "untitled"
+
+
+def unique_path(directory: str, filename: str) -> str:
+    """Return a path that does not collide, adding (1), (2), ... if needed."""
+    path = os.path.join(directory, filename)
+    stem, ext = os.path.splitext(filename)
     counter = 1
-    while os.path.exists(os.path.join(pwd, filename)):
-        filename = f"{song} ({counter}).mp3"
+    while os.path.exists(path):
+        path = os.path.join(directory, f"{stem} ({counter}){ext}")
         counter += 1
+    return path
 
-    with open(os.path.join(pwd, filename), 'wb') as outfile:
-        outfile.write(urlopen(req).read())
 
-else:  # if downloading all songs
-    soup = BeautifulSoup(html, 'html.parser')
-    s = soup.findAll("div", {"class": 'beat-list js-player-mark-active'})
-
-    for src in s:
-        src = str(src)
-
-        # exception handling because sometimes the html misformats (?)
+def download(url: str, dest: str) -> bool:
+    """Stream a file to disk with a progress readout; retry up to 3 times."""
+    headers = {"User-Agent": USER_AGENT, "Referer": TRAKTRAIN}
+    for attempt in range(1, 4):
         try:
-            srcstr = src.split("\"src\"")[1].split("\"")[1]
-        except IndexError:
-            srcstr = src.split("&quot;src&quot;")[1].split("&quot;")[1]
-        songUrl = baseUrl + srcstr
-        try:
-            songname = src.split("\"name\"")[1].split("\"")[1]
-        except IndexError:
-            songname = src.split("&quot;name&quot;")[1].split("&quot;")[1]
+            with urlopen(Request(url, headers=headers), timeout=120) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(dest, "wb") as out:
+                    while True:
+                        chunk = resp.read(CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            print(
+                                f"\r    {done * 100 // total:3d}% of {total} bytes",
+                                end="",
+                                flush=True,
+                            )
+            print()
+            return True
+        except (HTTPError, URLError, OSError) as exc:
+            print(f"\n    attempt {attempt}/3 failed: {exc}")
+            time.sleep(attempt)
+    return False
 
-        print("Downloading '" + songname + "'")
 
-        req = Request(songUrl)
-        req.add_header('Referer', 'https://traktrain.com/')  # traktrain blocks access unless this is set
+def grab(base_url: str, track: dict, out_dir: str, *, skip_existing: bool) -> str:
+    """Download one track. Returns 'downloaded', 'skipped' or 'failed'."""
+    src = str(track.get("src", "")).strip()
+    if not src:
+        return "failed"
+    url = src if src.startswith("http") else base_url + src.lstrip("/")
 
-        songname = re.sub(r'[^\w|\s]', '', songname)
-        songname = re.sub('[|]', '', songname)
-        filename = songname + ".mp3"
-        counter = 1
-        while os.path.exists(os.path.join(pwd, filename)):
-            filename = f"{songname} ({counter}).mp3"
-            counter += 1
+    name = sanitize(track.get("name") or track.get("id") or "untitled")
+    ext = os.path.splitext(src)[1] or ".mp3"
+    filename = name + ext
+    dest = os.path.join(out_dir, filename)
 
-        with open(os.path.join(pwd, filename), 'wb') as outfile:
-            outfile.write(urlopen(req).read())
+    if os.path.exists(dest):
+        if skip_existing:
+            print("    already exists, skipped")
+            return "skipped"
+        dest = unique_path(out_dir, filename)
+        print(f"    exists, saving as {os.path.basename(dest)}")
 
-print("\nAll songs downloaded!")
+    print(f"    {url}")
+    if download(url, dest):
+        return "downloaded"
+    if os.path.exists(dest):
+        os.remove(dest)  # drop partial file
+    return "failed"
+
+
+def main() -> None:
+    print("trakGrab v2.0 - downloads free previews from traktrain.com\n")
+    artist = input("What is the artist name? traktrain.com/").strip()
+    url_match = re.search(r"traktrain\.com/([^/?#\s]+)", artist, re.IGNORECASE)
+    if url_match:  # accept a full profile URL as input, too
+        artist = url_match.group(1)
+    if not artist:
+        sys.exit("No artist given.")
+    wanted = input("Which song? (* for all) ").strip() or "*"
+
+    print("\nConnecting...")
+    try:
+        base_url, tracks = scrape_artist(artist)
+    except HTTPError as exc:
+        if exc.code == 404:
+            sys.exit(f"Artist '{artist}' not found on traktrain.com.")
+        sys.exit(f"traktrain returned HTTP {exc.code}.")
+    except URLError as exc:
+        sys.exit(f"Connection failed: {exc.reason}")
+
+    if not tracks:
+        sys.exit(f"No tracks found for '{artist}'.")
+
+    print(f"Connected! Found {len(tracks)} track(s).\n")
+
+    out_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "songs", artist
+    )
+    os.makedirs(out_dir, exist_ok=True)
+
+    if wanted != "*":
+        track = pick_song(tracks, wanted)
+        if track is None:
+            print(f"Song '{wanted}' not found. Available tracks:")
+            for t in tracks:
+                print("  -", str(t.get("name", "?")).strip())
+            sys.exit(1)
+        grab(base_url, track, out_dir, skip_existing=False)
+    else:
+        stats = {"downloaded": 0, "skipped": 0, "failed": 0}
+        for i, track in enumerate(tracks, 1):
+            print(f"[{i}/{len(tracks)}] {str(track.get('name', '?')).strip()}")
+            stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
+        print(
+            f"\nDone! {stats['downloaded']} downloaded, "
+            f"{stats['skipped']} already existed, {stats['failed']} failed."
+        )
+    print(f"Saved to: {out_dir}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        sys.exit(130)
