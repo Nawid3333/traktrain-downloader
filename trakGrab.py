@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 # trakGrab.py
 # Original by Daniel Guilbert, Nawid Salehie (12.11.19 - 07.08.24)
-# Modernized 2026 for the current traktrain.com markup (v2.0)
+# Modernized 2026 for the current traktrain.com markup (v2.2)
 #
 # Downloads the free preview MP3s of every published track on a
 # traktrain.com producer profile, following all pagination pages.
+
+from __future__ import annotations
 
 import json
 import os
 import re
 import sys
 import time
-from urllib.parse import quote
+from pathlib import Path
+from typing import Any
 
 import httpx
 from lxml import html as lxml_html
@@ -23,12 +26,21 @@ USER_AGENT = (
 PAGE_CAP = 100  # safety cap for pagination
 CHUNK = 64 * 1024  # download chunk size
 MAX_NAME_LEN = 180  # keep filenames well under Windows' 255-char limit
+DOWNLOAD_RETRIES = 3  # attempts per file
 
 BASE_URL_RE = re.compile(r"var\s+AWS_BASE_URL\s*=\s*'([^']+)'")
 PROFILE_TRACKS_RE = re.compile(r"/profile-tracks/(\d+)")
+PROFILE_URL_RE = re.compile(r"traktrain\.com/([^/?#\s]+)", re.IGNORECASE)
 # Tab is deliberately excluded so the whitespace collapse below can turn it
 # into a space instead of gluing words together.
 ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x08\x0b-\x1f]')
+# Reserved Windows device names, case-insensitive: CON, PRN, AUX, COM1-9, LPT1-9.
+RESERVED_NAMES_RE = re.compile(r"(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$")
+
+
+class ScrapeError(Exception):
+    """A scraping problem worth reporting without a traceback."""
+
 
 # One httpx client for the whole run: connection reuse against the site and
 # the CDN, HTTP/2 where CloudFront offers it, browser-like default headers.
@@ -65,10 +77,20 @@ def fetch_text(url: str, *, ajax: bool = False) -> str:
     return resp.text
 
 
-def parse_tracks(html: str) -> list[dict]:
-    """Extract every track's JSON payload from data-player-info attributes."""
-    tree = lxml_html.fromstring(html)
-    tracks: list[dict] = []
+def parse_tracks(html: str) -> list[dict[str, Any]]:
+    """Extract every track's JSON payload from data-player-info attributes.
+
+    Empty or whitespace-only input raises lxml's ParserError; callers rely on
+    getting an empty list back for that instead (pagination feeds it blank
+    pages as a matter of course).
+    """
+    if not html or not html.strip():
+        return []
+    try:
+        tree = lxml_html.fromstring(html)
+    except lxml_html.ParserError:
+        return []
+    tracks: list[dict[str, Any]] = []
     for node in tree.xpath("//*[@data-player-info]"):
         raw = node.get("data-player-info")
         try:
@@ -92,10 +114,10 @@ def parse_tracks(html: str) -> list[dict]:
     return tracks
 
 
-def dedupe(tracks: list[dict]) -> list[dict]:
-    """Drop duplicate tracks (same id or same src)."""
-    seen: set[object] = set()
-    unique: list[dict] = []
+def dedupe(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop duplicate tracks (same id or same src), keeping first occurrence."""
+    seen: set[Any] = set()
+    unique: list[dict[str, Any]] = []
     for track in tracks:
         key = track.get("id", track.get("src"))
         if key in seen:
@@ -105,13 +127,13 @@ def dedupe(tracks: list[dict]) -> list[dict]:
     return unique
 
 
-def paginate(first_page_html: str) -> list[dict]:
+def paginate(first_page_html: str) -> list[dict[str, Any]]:
     """Follow the ?page=N pagination of a producer profile, if it has one."""
     endpoint = PROFILE_TRACKS_RE.search(first_page_html)
     if not endpoint:
         return []
     base = TRAKTRAIN.rstrip("/")
-    tracks: list[dict] = []
+    tracks: list[dict[str, Any]] = []
     for page in range(2, PAGE_CAP + 1):
         url = f"{base}{endpoint.group(0)}?page={page}"
         try:
@@ -131,19 +153,27 @@ def extract_base_url(html: str) -> str:
     """Read the CDN base URL (var AWS_BASE_URL) from the profile page."""
     match = BASE_URL_RE.search(html)
     if not match:
-        sys.exit("Could not find the CDN base URL on the profile page.")
+        raise ScrapeError("Could not find the CDN base URL on the profile page.")
     return match.group(1)
 
 
-def scrape_artist(artist: str) -> tuple[str, list[dict]]:
-    """Return (CDN base URL, deduplicated track list) for a producer."""
-    html = fetch_text(TRAKTRAIN + quote(artist))
+def scrape_artist(artist: str) -> tuple[str, list[dict[str, Any]]]:
+    """Return (CDN base URL, deduplicated track list) for a producer.
+
+    Raises httpx.HTTPStatusError (404 = unknown artist) or ScrapeError when
+    the page structure is not what this scraper understands.
+    """
+    # httpx.URL percent-encodes the path, so spaces and unicode in an artist
+    # slug work without importing urllib.parse. The combined path must keep
+    # its leading slash or httpx rejects it.
+    url = httpx.URL(TRAKTRAIN).copy_with(path=f"/{artist.strip('/')}")
+    html = fetch_text(str(url))
     base_url = extract_base_url(html)
     tracks = parse_tracks(html) + paginate(html)
     return base_url, dedupe(tracks)
 
 
-def display_name(track: dict) -> str:
+def display_name(track: dict[str, Any]) -> str:
     """Return 'artist - title' when the artist is known, else the bare title."""
     name = str(track.get("name", "?")).strip()
     artist = str(track.get("artist", "")).strip()
@@ -152,9 +182,11 @@ def display_name(track: dict) -> str:
     return name
 
 
-def pick_song(tracks: list[dict], wanted: str) -> dict | None:
+def pick_song(tracks: list[dict[str, Any]], wanted: str) -> dict[str, Any] | None:
     """Case-insensitive match on title or 'artist - title': exact, then substring."""
     wanted_low = wanted.casefold().strip()
+    if not wanted_low:
+        return None
     for track in tracks:
         titles = {str(track.get("name", "")).strip().casefold(), display_name(track).casefold()}
         if wanted_low in titles:
@@ -172,26 +204,46 @@ def sanitize(name: str) -> str:
     return cleaned[:MAX_NAME_LEN] or "untitled"
 
 
-def unique_path(directory: str, filename: str) -> str:
+def unique_path(directory: Path, filename: str) -> Path:
     """Return a path that does not collide, adding (1), (2), ... if needed."""
-    path = os.path.join(directory, filename)
+    path = directory / filename
     stem, ext = os.path.splitext(filename)
     counter = 1
-    while os.path.exists(path):
-        path = os.path.join(directory, f"{stem} ({counter}){ext}")
+    while path.exists():
+        path = directory / f"{stem} ({counter}){ext}"
         counter += 1
     return path
 
 
-def download(url: str, dest: str) -> bool:
-    """Stream a file to disk with a progress readout; retry up to 3 times."""
-    for attempt in range(1, 4):
+def safe_filename(directory: Path, label: str, ext: str) -> Path:
+    """Sanitize a track label into a collision-free path inside directory.
+
+    Windows silently reserves names like CON or COM1 in every directory, so
+    those get an underscore suffix rather than a confusing failure later.
+    """
+    name = sanitize(label)
+    if RESERVED_NAMES_RE.match(name):
+        name = f"_{name}"
+    filename = name + ext
+    dest = directory / filename
+    if dest.exists():
+        dest = unique_path(directory, filename)
+    return dest
+
+
+def download(url: str, dest: Path) -> bool:
+    """Stream a file to disk with a progress readout; retry, then clean up.
+
+    Partial files are removed immediately so a failed attempt never leaves a
+    broken file that later runs would treat as already-fetched.
+    """
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
             with get_client().stream("GET", url, timeout=120) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("Content-Length") or 0)
                 done = 0
-                with open(dest, "wb") as out:
+                with dest.open("wb") as out:
                     for chunk in resp.iter_bytes(CHUNK):
                         out.write(chunk)
                         done += len(chunk)
@@ -200,12 +252,14 @@ def download(url: str, dest: str) -> bool:
             print()
             return True
         except (httpx.HTTPError, OSError) as exc:
-            print(f"\n    attempt {attempt}/3 failed: {exc}")
-            time.sleep(attempt)
+            print(f"\n    attempt {attempt}/{DOWNLOAD_RETRIES} failed: {exc}")
+            dest.unlink(missing_ok=True)
+            if attempt < DOWNLOAD_RETRIES:
+                time.sleep(attempt)
     return False
 
 
-def grab(base_url: str, track: dict, out_dir: str, *, skip_existing: bool) -> str:
+def grab(base_url: str, track: dict[str, Any], out_dir: Path, *, skip_existing: bool) -> str:
     """Download one track. Returns 'downloaded', 'skipped' or 'failed'."""
     src = str(track.get("src", "")).strip()
     if not src:
@@ -213,37 +267,36 @@ def grab(base_url: str, track: dict, out_dir: str, *, skip_existing: bool) -> st
     url = src if src.startswith("http") else base_url + src.lstrip("/")
 
     # File names read like 'mel - 6Figures.mp3' when the artist is known.
-    if track.get("artist"):
-        label = display_name(track)
-    else:
-        label = str(track.get("name") or track.get("id") or "untitled")
-    name = sanitize(label)
+    label = display_name(track) if track.get("artist") else str(track.get("name") or track.get("id") or "untitled")
     ext = os.path.splitext(src)[1] or ".mp3"
-    filename = name + ext
-    dest = os.path.join(out_dir, filename)
+    dest = out_dir / (sanitize(label) + ext)
 
-    if os.path.exists(dest):
+    if dest.exists():
         if skip_existing:
             print("    already exists, skipped")
             return "skipped"
-        dest = unique_path(out_dir, filename)
-        print(f"    exists, saving as {os.path.basename(dest)}")
+        dest = safe_filename(out_dir, label, ext)
+        print(f"    exists, saving as {dest.name}")
 
     print(f"    {url}")
     if download(url, dest):
         return "downloaded"
-    if os.path.exists(dest):
-        os.remove(dest)  # drop partial file
+    dest.unlink(missing_ok=True)  # drop partial file
     return "failed"
+
+
+def resolve_artist_input(raw: str) -> str:
+    """Accept either a bare slug or a full profile URL; return the slug."""
+    url_match = PROFILE_URL_RE.search(raw.strip())
+    if url_match:
+        return url_match.group(1)
+    return raw.strip().strip("/")
 
 
 def main() -> None:
     try:
-        print("trakGrab - downloads free previews from traktrain.com\n")
-        artist = input("What is the artist name? traktrain.com/").strip()
-        url_match = re.search(r"traktrain\.com/([^/?#\s]+)", artist, re.IGNORECASE)
-        if url_match:  # accept a full profile URL as input, too
-            artist = url_match.group(1)
+        print("trakGrab v2.2 - downloads free previews from traktrain.com\n")
+        artist = resolve_artist_input(input("What is the artist name? traktrain.com/"))
         if not artist:
             sys.exit("No artist given.")
         wanted = input("Which song? (* for all) ").strip() or "*"
@@ -257,14 +310,16 @@ def main() -> None:
             sys.exit(f"traktrain returned HTTP {exc.response.status_code}.")
         except httpx.HTTPError as exc:
             sys.exit(f"Connection failed: {exc}")
+        except ScrapeError as exc:
+            sys.exit(str(exc))
 
         if not tracks:
             sys.exit(f"No tracks found for '{artist}'.")
 
         print(f"Connected! Found {len(tracks)} track(s).\n")
 
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", artist)
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = Path(__file__).resolve().parent / "songs" / artist
+        out_dir.mkdir(parents=True, exist_ok=True)
 
         if wanted != "*":
             track = pick_song(tracks, wanted)

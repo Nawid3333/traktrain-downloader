@@ -72,6 +72,14 @@ class TestParseTracks:
         tracks = trakGrab.parse_tracks(html)
         assert [t["name"].strip() for t in tracks] == ["candycrush", "second"]
 
+    def test_empty_input_returns_empty_list(self):
+        """Pagination feeds blank pages; lxml would raise ParserError on them."""
+        for blank in ("", "   ", "\n"):
+            assert trakGrab.parse_tracks(blank) == []
+
+    def test_malformed_html_returns_empty_list(self):
+        assert trakGrab.parse_tracks("<<<not html at all") == []
+
 
 class TestDisplayName:
     def test_artist_is_prefixed(self):
@@ -109,6 +117,10 @@ class TestPickSong:
     def test_no_match_returns_none(self):
         assert trakGrab.pick_song(self.TRACKS, "nope") is None
 
+    def test_an_empty_query_matches_nothing(self):
+        assert trakGrab.pick_song(self.TRACKS, "") is None
+        assert trakGrab.pick_song(self.TRACKS, "   ") is None
+
 
 class TestSanitize:
     def test_windows_illegal_characters_are_removed(self):
@@ -133,18 +145,34 @@ class TestSanitize:
         assert trakGrab.sanitize("") == "untitled"
 
 
+class TestSafeFilename:
+    """The Windows reserved-name guard and collision handling in one place."""
+
+    def test_a_normal_name_passes_through(self, tmp_path):
+        assert trakGrab.safe_filename(tmp_path, "mel - 6Figures", ".mp3") == tmp_path / "mel - 6Figures.mp3"
+
+    def test_reserved_device_names_get_an_underscore(self, tmp_path):
+        assert trakGrab.safe_filename(tmp_path, "CON", ".mp3") == tmp_path / "_CON.mp3"
+        assert trakGrab.safe_filename(tmp_path, "com1", ".mp3") == tmp_path / "_com1.mp3"
+        assert trakGrab.safe_filename(tmp_path, "LPT1", ".mp3") == tmp_path / "_LPT1.mp3"
+
+    def test_an_existing_file_gets_a_numbered_suffix(self, tmp_path):
+        (tmp_path / "mel - 6Figures.mp3").write_bytes(b"x")
+        assert trakGrab.safe_filename(tmp_path, "mel - 6Figures", ".mp3") == tmp_path / "mel - 6Figures (1).mp3"
+
+
 class TestUniquePath:
     def test_no_collision_returns_the_path_itself(self, tmp_path):
-        assert trakGrab.unique_path(str(tmp_path), "a.mp3") == str(tmp_path / "a.mp3")
+        assert trakGrab.unique_path(tmp_path, "a.mp3") == tmp_path / "a.mp3"
 
     def test_collision_gets_a_numbered_suffix(self, tmp_path):
         (tmp_path / "a.mp3").write_bytes(b"x")
-        assert trakGrab.unique_path(str(tmp_path), "a.mp3") == str(tmp_path / "a (1).mp3")
+        assert trakGrab.unique_path(tmp_path, "a.mp3") == tmp_path / "a (1).mp3"
 
     def test_numbering_increments(self, tmp_path):
         (tmp_path / "a.mp3").write_bytes(b"x")
         (tmp_path / "a (1).mp3").write_bytes(b"x")
-        assert trakGrab.unique_path(str(tmp_path), "a.mp3") == str(tmp_path / "a (2).mp3")
+        assert trakGrab.unique_path(tmp_path, "a.mp3") == tmp_path / "a (2).mp3"
 
 
 class TestDedupe:
@@ -162,16 +190,30 @@ class TestBaseUrl:
         html = "<script>var AWS_BASE_URL = 'https://d2lvs3zi8kbddv.cloudfront.net/';</script>"
         assert trakGrab.extract_base_url(html) == "https://d2lvs3zi8kbddv.cloudfront.net/"
 
-    def test_a_missing_base_url_exits_loudly(self):
-        with pytest.raises(SystemExit):
+    def test_a_missing_base_url_raises_scrape_error(self):
+        with pytest.raises(trakGrab.ScrapeError):
             trakGrab.extract_base_url("<html></html>")
+
+
+class TestResolveArtistInput:
+    def test_a_bare_slug_passes_through(self):
+        assert trakGrab.resolve_artist_input("uq") == "uq"
+
+    def test_a_full_profile_url_is_reduced_to_the_slug(self):
+        assert trakGrab.resolve_artist_input("https://traktrain.com/uq") == "uq"
+
+    def test_surrounding_slashes_are_trimmed(self):
+        assert trakGrab.resolve_artist_input("/mel-beats/") == "mel-beats"
+
+    def test_an_empty_input_stays_empty(self):
+        assert trakGrab.resolve_artist_input("   ") == ""
 
 
 class TestVersion:
     def test_the_banner_and_pyproject_do_not_drift(self):
-        """The printed version is cosmetic, but it should not lie about the release."""
+        """The printed banner should agree with the packaged major.minor."""
         import tomllib
 
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
-        assert version.split(".")[:2] == ["2", "1"]
+        assert version.split(".")[:2] == ["2", "2"]
