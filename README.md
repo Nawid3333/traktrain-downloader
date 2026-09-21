@@ -54,8 +54,10 @@ trakgrab
 
 ### Output
 
-Beats land in `songs/<artist>/<track name>.mp3` next to the script, with
-`(1)`, `(2)` suffixes on the rare name collisions.
+Beats land in `songs/<artist>/<artist> - <track name>.mp3` next to the
+script — file names read like `mel - 6Figures.mp3`, exactly as traktrain
+labels them on the profile page. Rare name collisions get `(1)`, `(2)`
+suffixes.
 
 ## How it works
 
@@ -70,13 +72,16 @@ trakGrab.py ── GET https://traktrain.com/<artist> (browser User-Agent)
      GET <AWS_BASE_URL>/<src>   Referer: https://traktrain.com/
                 │
                 ▼
-     songs/<artist>/<sanitized track name>.mp3
+     songs/<artist>/<artist> - <sanitized track name>.mp3
 ```
 
 The parsing deliberately uses BeautifulSoup + `json.loads` on the
 `data-player-info` attribute instead of string splitting: traktrain changed
 the JSON's key order at some point (the first key is `prices` now, not
-`name`), which silently broke regex-based scrapers.
+`name`), which silently broke regex-based scrapers. The artist display name
+lives only in the same div's `data-name="<artist> - <track>"` attribute —
+the JSON payload itself carries just the producer link — and is used to
+prefix every file name.
 
 ## Project layout
 

@@ -54,14 +54,20 @@ def parse_tracks(html: str) -> list[dict]:
             info = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             continue  # attribute misformatted; skip rather than crash
-        if isinstance(info, dict) and info.get("src"):
-            if not info.get("name"):
-                fallback = node.get("data-name")
-                if isinstance(fallback, str) and " - " in fallback:
-                    info["name"] = fallback.rsplit(" - ", 1)[-1]
-                elif isinstance(fallback, str):
-                    info["name"] = fallback
-            tracks.append(info)
+        if not (isinstance(info, dict) and info.get("src")):
+            continue
+        # The play-button div also carries data-name="<artist> - <track>".
+        # The JSON payload itself has no artist field, so this is where the
+        # display name comes from (e.g. data-name="mel - candycrush").
+        data_name = node.get("data-name")
+        if isinstance(data_name, str) and " - " in data_name:
+            artist, _, rest = data_name.partition(" - ")
+            artist, rest = artist.strip(), rest.strip()
+            if artist:
+                info.setdefault("artist", artist)
+            if not info.get("name") and rest:
+                info["name"] = rest
+        tracks.append(info)
     return tracks
 
 
@@ -116,14 +122,26 @@ def scrape_artist(artist: str) -> tuple[str, list[dict]]:
     return base_url, dedupe(tracks)
 
 
+def display_name(track: dict) -> str:
+    """Return 'artist - title' when the artist is known, else the bare title."""
+    name = str(track.get("name", "?")).strip()
+    artist = str(track.get("artist", "")).strip()
+    if artist and not name.casefold().startswith(f"{artist} - ".casefold()):
+        return f"{artist} - {name}"
+    return name
+
+
 def pick_song(tracks: list[dict], wanted: str) -> dict | None:
-    """Case-insensitive match: exact name first, then substring."""
-    wanted_low = wanted.casefold()
+    """Case-insensitive match on title or 'artist - title': exact, then substring."""
+    wanted_low = wanted.casefold().strip()
     for track in tracks:
-        if str(track.get("name", "")).strip().casefold() == wanted_low:
+        titles = {str(track.get("name", "")).strip().casefold(),
+                  display_name(track).casefold()}
+        if wanted_low in titles:
             return track
     for track in tracks:
-        if wanted_low in str(track.get("name", "")).casefold():
+        if (wanted_low in str(track.get("name", "")).casefold()
+                or wanted_low in display_name(track).casefold()):
             return track
     return None
 
@@ -182,7 +200,12 @@ def grab(base_url: str, track: dict, out_dir: str, *, skip_existing: bool) -> st
         return "failed"
     url = src if src.startswith("http") else base_url + src.lstrip("/")
 
-    name = sanitize(track.get("name") or track.get("id") or "untitled")
+    # File names read like 'mel - 6Figures.mp3' when the artist is known.
+    if track.get("artist"):
+        label = display_name(track)
+    else:
+        label = str(track.get("name") or track.get("id") or "untitled")
+    name = sanitize(label)
     ext = os.path.splitext(src)[1] or ".mp3"
     filename = name + ext
     dest = os.path.join(out_dir, filename)
@@ -203,7 +226,7 @@ def grab(base_url: str, track: dict, out_dir: str, *, skip_existing: bool) -> st
 
 
 def main() -> None:
-    print("trakGrab v2.0 - downloads free previews from traktrain.com\n")
+    print("trakGrab v2.1 - downloads free previews from traktrain.com\n")
     artist = input("What is the artist name? traktrain.com/").strip()
     url_match = re.search(r"traktrain\.com/([^/?#\s]+)", artist, re.IGNORECASE)
     if url_match:  # accept a full profile URL as input, too
@@ -237,13 +260,13 @@ def main() -> None:
         if track is None:
             print(f"Song '{wanted}' not found. Available tracks:")
             for t in tracks:
-                print("  -", str(t.get("name", "?")).strip())
+                print("  -", display_name(t))
             sys.exit(1)
         grab(base_url, track, out_dir, skip_existing=False)
     else:
         stats = {"downloaded": 0, "skipped": 0, "failed": 0}
         for i, track in enumerate(tracks, 1):
-            print(f"[{i}/{len(tracks)}] {str(track.get('name', '?')).strip()}")
+            print(f"[{i}/{len(tracks)}] {display_name(track)}")
             stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
         print(
             f"\nDone! {stats['downloaded']} downloaded, "
