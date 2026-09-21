@@ -55,7 +55,9 @@ jobs:
             exit 1
           fi
 
-          pkg_version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          # tomllib needs 3.11+, but this job runs on the 3.10 floor, so read
+          # the version with a plain regex instead.
+          pkg_version=$(grep -oP '(?<=^version = ")[^"]+' pyproject.toml | head -n1)
           if [ "$tag_version" != "$pkg_version" ]; then
             echo "::error::Tag $TAG declares $tag_version but pyproject.toml says $pkg_version"
             echo "This release would attach packages named $pkg_version, not $tag_version."
