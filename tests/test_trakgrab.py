@@ -326,22 +326,17 @@ class TestResolveArtistInput:
 
 
 class TestVersion:
-    def test_the_banner_agrees_with_the_packaged_version(self):
-        """The printed banner must not name a different release than pyproject.
+    """semantic-release owns the version in pyproject.toml.
 
-        semantic-release bumps pyproject automatically, so the test derives
-        the expected banner from the file instead of pinning a number that
-        every release would break.
-        """
-        # tomllib is 3.11+; the 3.10 floor takes the backport.
-        try:
-            import tomllib
-        except ModuleNotFoundError:
-            import tomli as tomllib
+    The banner deliberately does not print one -- exactly like the sibling
+    repos' print_header(). A number that nothing renders cannot drift, so
+    these tests pin that decision instead of chasing releases.
+    """
 
-        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
-        version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
-        assert f"trakGrab v{version.rsplit('.', 1)[0]}" in _main_banner()
+    def test_the_banner_carries_no_version(self):
+        banner = trakGrab.banner()
+        assert banner.startswith("trakGrab - downloads free previews from traktrain.com")
+        assert " v" not in banner
 
 
 def _main_banner() -> str:

@@ -342,9 +342,18 @@ def resolve_artist_input(raw: str) -> str:
     return raw.strip().strip("/")
 
 
+def banner() -> str:
+    """The startup line. Deliberately version-free, like the sibling repos.
+
+    semantic-release owns the version in pyproject.toml; printing it here
+    would only create a second copy that every release silently drifts.
+    """
+    return "trakGrab - downloads free previews from traktrain.com\n"
+
+
 def main() -> None:
     try:
-        print("trakGrab v2.2 - downloads free previews from traktrain.com\n")
+        print(banner())
         artist = resolve_artist_input(input("What is the artist name? traktrain.com/"))
         if not artist:
             sys.exit("No artist given.")
