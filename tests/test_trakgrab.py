@@ -212,7 +212,11 @@ class TestResolveArtistInput:
 class TestVersion:
     def test_the_banner_and_pyproject_do_not_drift(self):
         """The printed banner should agree with the packaged major.minor."""
-        import tomllib
+        # tomllib is 3.11+; the 3.10 floor takes the backport.
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
 
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
