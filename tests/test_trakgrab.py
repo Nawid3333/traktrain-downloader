@@ -325,6 +325,110 @@ class TestResolveArtistInput:
         assert trakGrab.resolve_artist_input("   ") == ""
 
 
+class TestTrackLinkId:
+    """Single-track links, in the forms traktrain hands out."""
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            "https://traktrain.com/t/1678104",
+            "https://www.traktrain.com/t/1678104",
+            "traktrain.com/t/1678104/",
+            "https://traktrain.com/t/1678104?utm_source=x",
+            "t/1678104",
+            "/t/1678104",
+            "https://traktrain.com/uq?t=1678104",
+            "https://traktrain.com/uq/?ref=share&t=1678104",
+            "uq?t=1678104",
+            "  https://traktrain.com/t/1678104  ",
+        ],
+    )
+    def test_track_links_yield_the_id(self, link):
+        assert trakGrab.track_link_id(link) == "1678104"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "uq",
+            "https://traktrain.com/uq",
+            "https://traktrain.com/t/abc",
+            "https://traktrain.com/t/1678104abc",
+            "https://traktrain.com/uq?type=1",
+            "https://traktrain.com/uq?best=1&type=2",
+            "https://traktrain.com/uq?t=12x",
+            "",
+        ],
+    )
+    def test_anything_else_yields_none(self, text):
+        assert trakGrab.track_link_id(text) is None
+
+
+class TestSplitTrackLinks:
+    def test_links_and_other_tokens_are_separated_in_order(self):
+        ids, others = trakGrab.split_track_links("t/1 uq https://traktrain.com/t/2\thttps://traktrain.com/x?t=3")
+        assert ids == ["1", "2", "3"]
+        assert others == ["uq"]
+
+    def test_links_glued_together_by_a_one_line_paste_are_split(self):
+        glued = "https://traktrain.com/t/1678104https://traktrain.com/t/1697148HTTPS://traktrain.com/t/1700826"
+        assert trakGrab.split_track_links(glued) == (["1678104", "1697148", "1700826"], [])
+
+    def test_an_artist_name_with_a_space_has_no_links(self):
+        assert trakGrab.split_track_links("mel beat") == ([], ["mel", "beat"])
+
+
+class TestParseTrackPage:
+    """The /t/<id> page: payload inside FixedPlayer({...}, ...), November 2026."""
+
+    TRACK_JSON = (
+        '{"prices":[["MP3 Lease",20]],"bpm":145,"producerLink":"/uq","id":1678104,'
+        '"src":"78923/049a59cd-5e2c-2f56-cefd-af5fd4747db0.mp3","name":"maybesomedaybecametoday ",'
+        '"brand":"mel","user_id":78923}'
+    )
+
+    def _page(self, payload: str) -> str:
+        return (
+            "<script>$(document).ready(function(evnet) {"
+            f" const fp1 = FixedPlayer({payload}, true, null, null, false); }});</script>"
+        )
+
+    def test_the_payload_is_read_and_brand_becomes_the_artist(self):
+        track = trakGrab.parse_track_page(self._page(self.TRACK_JSON))
+        assert track is not None
+        assert track["id"] == 1678104
+        assert track["src"].endswith(".mp3")
+        assert track["artist"] == "mel"
+        assert trakGrab.display_name(track) == "mel - maybesomedaybecametoday"
+
+    def test_a_payload_without_brand_has_no_artist(self):
+        track = trakGrab.parse_track_page(self._page('{"id":1,"src":"a.mp3","name":"t"}'))
+        assert track is not None
+        assert "artist" not in track
+
+    def test_a_broken_call_is_skipped_for_a_later_good_one(self):
+        html = "FixedPlayer(not json) " + self._page(self.TRACK_JSON)
+        track = trakGrab.parse_track_page(html)
+        assert track is not None
+        assert track["id"] == 1678104
+
+    def test_a_payload_without_src_is_skipped(self):
+        assert trakGrab.parse_track_page(self._page('{"id":1,"name":"kit"}')) is None
+
+    def test_a_page_without_a_player_gives_none(self):
+        assert trakGrab.parse_track_page("<html>404</html>") is None
+
+
+class TestTrackFolder:
+    def test_the_producer_link_is_the_folder(self):
+        assert trakGrab.track_folder({"producerLink": "/uq", "artist": "mel"}) == "uq"
+
+    def test_without_a_producer_link_the_artist_is_used(self):
+        assert trakGrab.track_folder({"producerLink": "/", "artist": "mel"}) == "mel"
+
+    def test_with_neither_a_fixed_folder_is_used(self):
+        assert trakGrab.track_folder({}) == "tracks"
+
+
 class TestVersion:
     """semantic-release owns the version in pyproject.toml.
 

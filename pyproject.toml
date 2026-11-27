@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trakgrab"
 version = "2.3.3"
-description = "Download the free preview MP3s of every published track on a traktrain.com producer profile"
+description = "Download the free preview MP3s of a traktrain.com producer profile, or of single tracks by link"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"

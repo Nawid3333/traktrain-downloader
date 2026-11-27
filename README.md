@@ -2,8 +2,8 @@
 
 A small, terminal-driven Python tool that downloads the free preview MP3s of
 every published track on a [traktrain.com](https://traktrain.com) producer
-profile — with pagination support, resumable re-runs and Windows-safe
-filenames.
+profile — or of single tracks given by link — with pagination support,
+resumable re-runs and Windows-safe filenames.
 
 > **Status:** personal project, tested on Windows with Python 3.14 against
 > traktrain.com's September 2026 markup. CI runs the offline test suite on
@@ -26,6 +26,12 @@ filenames.
   pose as "already fetched"
 - Alternatively downloads a single track by name (case-insensitive, with
   substring matching and a listing of available tracks on a miss)
+- Or downloads single tracks straight from their links: paste one or more
+  track links (`https://traktrain.com/t/1678104`, or the
+  `https://traktrain.com/<artist>?t=1678104` form the track pages use),
+  separated by spaces or one per line. Each track lands in its producer's
+  folder under the same file name a profile download gives it, so the two
+  modes never download the same beat twice
 - Accepts a bare artist slug, a full profile URL, or an input with stray
   slashes; track names that collide with Windows reserved device names
   (CON, COM1, LPT1, ...) are saved with an underscore prefix
@@ -46,9 +52,16 @@ python -m pip install -r requirements.txt
 python trakGrab.py
 ```
 
-The script prompts for an artist (the part after `traktrain.com/`, or a full
-profile URL like `https://traktrain.com/uq`) and for a song. The wildcard
+The script prompts for an artist (the name as in `traktrain.com/<name>`, or a
+full profile URL like `https://traktrain.com/uq`) and for a song. The wildcard
 character (`*`) downloads all of the artist's available beats.
+
+To download single tracks instead, answer the first prompt with track links
+(`https://traktrain.com/t/1678104`, or just `t/1678104`). Several links can
+go on one line, separated by spaces, or be pasted one per line; the script
+keeps reading links until an empty line (press Enter), then downloads them
+all. Links that are already downloaded are skipped, so a pasted list can be
+run again safely.
 
 ### 3. Optional: install it as a command
 
@@ -81,6 +94,13 @@ trakGrab.py ── GET https://traktrain.com/<artist> (browser User-Agent)
                 ▼
      songs/<artist>/<artist> - <sanitized track name>.mp3
 ```
+
+A single-track page (`/t/<id>`) has no `data-player-info` div. Its payload —
+the same JSON, plus a `brand` field holding the artist's display name — is
+the first argument of an inline `FixedPlayer({...}, ...)` call, which the
+script reads with `json.JSONDecoder.raw_decode`. The payload's
+`producerLink` (`/uq`) picks the `songs/` folder, the same one the profile
+download uses.
 
 The parsing deliberately uses lxml + `json.loads` on the
 `data-player-info` attribute instead of string splitting: traktrain changed

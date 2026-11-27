@@ -27,6 +27,14 @@ PROFILE_HTML = (
     "<form data-endpoint='/profile-tracks/123'></form>"
     f"<div data-player-info='{TRACK_JSON}'></div></html>"
 )
+# A single-track page (/t/<id>), November 2026 shape: no data-player-info,
+# the payload is the first argument of an inline FixedPlayer(...) call.
+TRACK_PAGE_JSON = '{"prices":[],"producerLink":"/uq","id":1678104,"src":"78923/c.mp3","name":"hit ","brand":"mel"}'
+TRACK_PAGE_HTML = (
+    "<html><script>var AWS_BASE_URL = 'https://cdn.example/';</script>"
+    f"<script>const fp1 = FixedPlayer({TRACK_PAGE_JSON}, true, null);</script></html>"
+)
+LINK_TRACK = {"id": 1678104, "src": "78923/c.mp3", "name": "hit ", "artist": "mel", "producerLink": "/uq"}
 
 
 @pytest.fixture()
@@ -155,6 +163,111 @@ class TestScrapeArtist:
         respx_mock_scope.get("https://traktrain.com/ghost").respond(404)
         with pytest.raises(httpx.HTTPStatusError):
             trakGrab.scrape_artist("ghost")
+
+
+class TestScrapeTrack:
+    def test_a_track_page_gives_base_url_and_payload(self, _fresh_client, respx_mock_scope):
+        respx_mock_scope.get("https://traktrain.com/t/1678104").respond(200, text=TRACK_PAGE_HTML)
+        base_url, track = trakGrab.scrape_track("1678104")
+        assert base_url == "https://cdn.example/"
+        assert track["src"] == "78923/c.mp3"
+        assert track["artist"] == "mel"
+
+    def test_a_404_propagates_to_the_caller(self, _fresh_client, respx_mock_scope):
+        respx_mock_scope.get("https://traktrain.com/t/9").respond(404)
+        with pytest.raises(httpx.HTTPStatusError):
+            trakGrab.scrape_track("9")
+
+    def test_a_page_without_a_player_raises_scrape_error(self, _fresh_client, respx_mock_scope):
+        html = "<script>var AWS_BASE_URL = 'https://cdn.example/';</script>"
+        respx_mock_scope.get("https://traktrain.com/t/5").respond(200, text=html)
+        with pytest.raises(trakGrab.ScrapeError):
+            trakGrab.scrape_track("5")
+
+
+class TestGrabTrackLinks:
+    """Downloading by link: each failure is reported, the rest still run."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_download(self, monkeypatch):
+        monkeypatch.setattr(trakGrab, "download", lambda _u, t: (t.write_bytes(b"x"), True)[1])
+
+    def _scrape_by_id(self, monkeypatch, outcomes):
+        def fake(track_id):
+            outcome = outcomes[track_id]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return "https://cdn.example/", dict(outcome)
+
+        monkeypatch.setattr(trakGrab, "scrape_track", fake)
+
+    def test_a_track_lands_in_its_producer_folder(self, tmp_path, monkeypatch, capsys):
+        self._scrape_by_id(monkeypatch, {"1": LINK_TRACK})
+        trakGrab.grab_track_links(["1"], tmp_path)
+        assert (tmp_path / "uq" / "mel - hit.mp3").exists()
+        out = capsys.readouterr().out
+        assert "[1/1] mel - hit" in out
+        assert "1 downloaded, 0 already existed, 0 failed" in out
+        assert out.count("Saved to:") == 1
+
+    def test_a_second_run_skips_the_same_track(self, tmp_path, monkeypatch, capsys):
+        self._scrape_by_id(monkeypatch, {"1": LINK_TRACK})
+        trakGrab.grab_track_links(["1"], tmp_path)
+        trakGrab.grab_track_links(["1"], tmp_path)
+        assert "0 downloaded, 1 already existed" in capsys.readouterr().out
+        assert not (tmp_path / "uq" / "mel - hit (1).mp3").exists()
+
+    def test_every_failure_kind_is_counted_and_the_rest_continue(self, tmp_path, monkeypatch, capsys):
+        request = httpx.Request("GET", "https://traktrain.com/t/x")
+        self._scrape_by_id(
+            monkeypatch,
+            {
+                "404": httpx.HTTPStatusError("404", request=request, response=httpx.Response(404, request=request)),
+                "503": httpx.HTTPStatusError("503", request=request, response=httpx.Response(503, request=request)),
+                "net": httpx.ConnectError("no route to host"),
+                "kit": trakGrab.ScrapeError("no playable preview on the track page"),
+                "ok": LINK_TRACK,
+            },
+        )
+        trakGrab.grab_track_links(["404", "503", "net", "kit", "ok"], tmp_path)
+        out = capsys.readouterr().out
+        assert "Track 404: not found on traktrain.com." in out
+        assert "Track 503: traktrain returned HTTP 503." in out
+        assert "Track net: connection failed: no route to host" in out
+        assert "Track kit: no playable preview on the track page." in out
+        assert "1 downloaded, 0 already existed, 4 failed" in out
+        assert (tmp_path / "uq" / "mel - hit.mp3").exists()
+
+    def test_several_producers_get_one_saved_line_each(self, tmp_path, monkeypatch, capsys):
+        other = {"id": 2, "src": "9/d.mp3", "name": "two", "artist": "zed", "producerLink": "/zed"}
+        third = {**LINK_TRACK, "id": 3, "src": "78923/e.mp3", "name": "three"}
+        self._scrape_by_id(monkeypatch, {"1": LINK_TRACK, "2": other, "3": third})
+        trakGrab.grab_track_links(["1", "2", "3"], tmp_path)
+        out = capsys.readouterr().out
+        assert out.count("Saved to:") == 2
+        assert (tmp_path / "zed" / "zed - two.mp3").exists()
+        assert (tmp_path / "uq" / "mel - three.mp3").exists()
+
+
+class TestReadMoreLinks:
+    def _inputs(self, monkeypatch, *answers):
+        it = iter(answers)
+
+        def fake_input(_prompt=""):
+            try:
+                return next(it)
+            except StopIteration:
+                raise EOFError from None
+
+        monkeypatch.setattr("builtins.input", fake_input)
+
+    def test_lines_are_read_until_an_empty_one(self, monkeypatch):
+        self._inputs(monkeypatch, " t/2 ", "t/3", "", "never read")
+        assert trakGrab.read_more_links() == ["t/2", "t/3"]
+
+    def test_end_of_input_also_ends_the_list(self, monkeypatch):
+        self._inputs(monkeypatch, "t/2")
+        assert trakGrab.read_more_links() == ["t/2"]
 
 
 class TestDownload:
@@ -443,6 +556,35 @@ class TestMain:
 
         trakGrab.main()
         assert seen["artist"] == "uq"
+
+    def test_track_links_skip_the_song_prompt(self, monkeypatch, capsys):
+        """One line with links, more pasted lines, an empty line to start."""
+        self._inputs(
+            monkeypatch,
+            "https://traktrain.com/t/1 uq",
+            "https://traktrain.com/t/2",
+            "https://traktrain.com/t/1",  # pasted twice: downloaded once
+            "",
+        )
+        seen = []
+
+        def fake_scrape(track_id):
+            seen.append(track_id)
+            track = {**LINK_TRACK, "id": int(track_id), "src": f"78923/{track_id}.mp3", "name": f"n{track_id}"}
+            return "https://cdn.example/", track
+
+        monkeypatch.setattr(trakGrab, "scrape_track", fake_scrape)
+        monkeypatch.setattr(trakGrab, "scrape_artist", lambda _a: pytest.fail("artist mode must not run"))
+
+        trakGrab.main()
+
+        assert seen == ["1", "2"]
+        out = capsys.readouterr().out
+        assert "Not a track link, skipped: uq" in out
+        assert "2 track link(s)" in out
+        assert "2 downloaded" in out
+        assert (self.tmp_path / "songs" / "uq" / "mel - n1.mp3").exists()
+        assert (self.tmp_path / "songs" / "uq" / "mel - n2.mp3").exists()
 
     def test_a_whitespace_song_defaults_to_all(self, monkeypatch, capsys):
         """An empty song answer means '*', not 'match nothing'."""

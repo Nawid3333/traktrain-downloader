@@ -4,7 +4,8 @@
 # Modernized 2026 for the current traktrain.com markup (v2.2)
 #
 # Downloads the free preview MP3s of every published track on a
-# traktrain.com producer profile, following all pagination pages.
+# traktrain.com producer profile, following all pagination pages -- or of
+# single tracks given by link (traktrain.com/t/<id>).
 
 from __future__ import annotations
 
@@ -32,6 +33,22 @@ DOWNLOAD_RETRIES = 3  # attempts per file
 BASE_URL_RE = re.compile(r"var\s+AWS_BASE_URL\s*=\s*'([^']+)'")
 PROFILE_TRACKS_RE = re.compile(r"/profile-tracks/(\d+)")
 PROFILE_URL_RE = re.compile(r"traktrain\.com/([^/?#\s]+)", re.IGNORECASE)
+# A single-track link, in either of the two forms traktrain uses: the share
+# link traktrain.com/t/<id>, and the canonical traktrain.com/<artist>?t=<id>
+# its track pages advertise (og:url). The site part is optional, so a bare
+# "t/<id>" works too.
+TRACK_URL_RE = re.compile(
+    r"(?:traktrain\.com/|^/?)(?:t/(\d+)|[^/?#\s]+/?\?(?:[^#\s]*&)?t=(\d+))(?=[/?#&]|$)",
+    re.IGNORECASE,
+)
+# The spot right before an "http(s)://" that directly follows other text.
+# Some terminals offer to paste several lines "as one line" and join them
+# with nothing in between ("...t/1678104https://traktrain.com/t/1697148");
+# a space inserted here splits such glued links apart again.
+GLUED_LINK_RE = re.compile(r"(?<=\S)(?=https?://)", re.IGNORECASE)
+# A track page (/t/<id>) has no data-player-info div; its JSON payload is the
+# argument of an inline FixedPlayer({...}, ...) call instead.
+FIXED_PLAYER_RE = re.compile(r"FixedPlayer\(\s*")
 # Tab is deliberately excluded so the whitespace collapse below can turn it
 # into a space instead of gluing words together.
 ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x08\x0b-\x1f]')
@@ -115,6 +132,29 @@ def parse_tracks(html: str) -> list[dict[str, Any]]:
     return tracks
 
 
+def parse_track_page(html: str) -> dict[str, Any] | None:
+    """Extract the track payload from a single-track page (/t/<id>).
+
+    The JSON is the first argument of the page's FixedPlayer({...}, ...)
+    call; raw_decode reads exactly one JSON value and ignores the rest of
+    the call. The artist display name is the payload's "brand" field (the
+    same name a profile page puts in data-name="<artist> - <track>").
+    """
+    decoder = json.JSONDecoder()
+    for match in FIXED_PLAYER_RE.finditer(html):
+        try:
+            info, _ = decoder.raw_decode(html, match.end())
+        except json.JSONDecodeError:
+            continue
+        if not (isinstance(info, dict) and info.get("src")):
+            continue
+        brand = str(info.get("brand") or "").strip()
+        if brand:
+            info.setdefault("artist", brand)
+        return info
+    return None
+
+
 def dedupe(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop duplicate tracks (same id or same src), keeping first occurrence."""
     seen: set[Any] = set()
@@ -151,10 +191,10 @@ def paginate(first_page_html: str) -> list[dict[str, Any]]:
 
 
 def extract_base_url(html: str) -> str:
-    """Read the CDN base URL (var AWS_BASE_URL) from the profile page."""
+    """Read the CDN base URL (var AWS_BASE_URL) from a profile or track page."""
     match = BASE_URL_RE.search(html)
     if not match:
-        raise ScrapeError("Could not find the CDN base URL on the profile page.")
+        raise ScrapeError("Could not find the CDN base URL on the page.")
     return match.group(1)
 
 
@@ -172,6 +212,31 @@ def scrape_artist(artist: str) -> tuple[str, list[dict[str, Any]]]:
     base_url = extract_base_url(html)
     tracks = parse_tracks(html) + paginate(html)
     return base_url, dedupe(tracks)
+
+
+def scrape_track(track_id: str) -> tuple[str, dict[str, Any]]:
+    """Return (CDN base URL, track payload) for one track page (/t/<id>).
+
+    Raises httpx.HTTPStatusError (404 = unknown track) or ScrapeError when
+    the page carries no playable track.
+    """
+    html = fetch_text(f"{TRAKTRAIN}t/{track_id}")
+    base_url = extract_base_url(html)
+    track = parse_track_page(html)
+    if track is None:
+        raise ScrapeError("no playable preview on the track page")
+    return base_url, track
+
+
+def track_folder(track: dict[str, Any]) -> str:
+    """The songs/ subfolder for a track fetched by link.
+
+    The payload's producerLink ("/uq") is the profile slug, so a track link
+    lands in the very folder -- and under the very file name -- that the
+    artist's profile download uses, and re-runs skip it either way.
+    """
+    slug = str(track.get("producerLink") or "").strip().strip("/")
+    return slug or str(track.get("artist") or "tracks")
 
 
 def display_name(track: dict[str, Any]) -> str:
@@ -342,6 +407,90 @@ def resolve_artist_input(raw: str) -> str:
     return raw.strip().strip("/")
 
 
+def track_link_id(token: str) -> str | None:
+    """Return the track ID of a single-track link, or None for anything else."""
+    match = TRACK_URL_RE.search(token.strip())
+    if not match:
+        return None
+    return match.group(1) or match.group(2)
+
+
+def split_track_links(raw: str) -> tuple[list[str], list[str]]:
+    """Split whitespace-separated input into (track IDs, everything else).
+
+    Links pasted with no space between them count as separate links.
+    """
+    ids: list[str] = []
+    others: list[str] = []
+    for token in GLUED_LINK_RE.sub(" ", raw).split():
+        track_id = track_link_id(token)
+        if track_id:
+            ids.append(track_id)
+        else:
+            others.append(token)
+    return ids, others
+
+
+def read_more_links() -> list[str]:
+    """Read further lines of track links until an empty line or end of input.
+
+    Pasting several links one per line feeds them to input() one line at a
+    time; without this loop, every line after the first would end up in the
+    shell once the script exits.
+    """
+    lines: list[str] = []
+    while True:
+        try:
+            line = input("More track links? (Enter to start) ").strip()
+        except EOFError:
+            break
+        if not line:
+            break
+        lines.append(line)
+    return lines
+
+
+def grab_track_links(track_ids: list[str], songs_root: Path) -> None:
+    """Download tracks given by link, each into its producer's folder.
+
+    A link that fails (unknown ID, network error, page without a preview)
+    is counted and reported, and the remaining links still run.
+    """
+    stats = {"downloaded": 0, "skipped": 0, "failed": 0}
+    folders: list[Path] = []
+    for i, track_id in enumerate(track_ids, 1):
+        prefix = f"[{i}/{len(track_ids)}]"
+        try:
+            base_url, track = scrape_track(track_id)
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            reason = "not found on traktrain.com" if code == 404 else f"traktrain returned HTTP {code}"
+            print(f"{prefix} Track {track_id}: {reason}.")
+            stats["failed"] += 1
+            continue
+        except httpx.HTTPError as exc:
+            print(f"{prefix} Track {track_id}: connection failed: {exc}")
+            stats["failed"] += 1
+            continue
+        except ScrapeError as exc:
+            print(f"{prefix} Track {track_id}: {exc}.")
+            stats["failed"] += 1
+            continue
+
+        out_dir = songs_root / sanitize(track_folder(track))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if out_dir not in folders:
+            folders.append(out_dir)
+        print(f"{prefix} {display_name(track)}")
+        # A link names one exact track (the ID marker confirms it), so a
+        # re-run skips it rather than saving a numbered copy of the same file.
+        stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
+
+    print(f"\nDone! {stats['downloaded']} downloaded, {stats['skipped']} already existed, {stats['failed']} failed.")
+    for folder in folders:
+        print(f"Saved to: {folder}")
+
+
 def banner() -> str:
     """The startup line. Deliberately version-free, like the sibling repos.
 
@@ -354,7 +503,25 @@ def banner() -> str:
 def main() -> None:
     try:
         print(banner())
-        artist = resolve_artist_input(input("What is the artist name? traktrain.com/"))
+        # No "traktrain.com/" printed after the question: full links are
+        # pasted here, and the prefix would sit in front of them on screen.
+        raw = input("Artist name, profile link or track link(s): ")
+        songs_root = Path(__file__).resolve().parent / "songs"
+
+        track_ids, others = split_track_links(raw)
+        if track_ids:
+            for line in read_more_links():
+                more_ids, more_others = split_track_links(line)
+                track_ids += more_ids
+                others += more_others
+            for other in others:
+                print(f"Not a track link, skipped: {other}")
+            track_ids = list(dict.fromkeys(track_ids))  # same link twice: once
+            print(f"\nConnecting... {len(track_ids)} track link(s).")
+            grab_track_links(track_ids, songs_root)
+            return
+
+        artist = resolve_artist_input(raw)
         if not artist:
             sys.exit("No artist given.")
         wanted = input("Which song? (* for all) ").strip() or "*"
@@ -380,7 +547,7 @@ def main() -> None:
         # keyboard, so it gets the same filename treatment as track names:
         # '..' would otherwise escape songs/, and a reserved name would fail
         # oddly at mkdir time.
-        out_dir = Path(__file__).resolve().parent / "songs" / sanitize(artist)
+        out_dir = songs_root / sanitize(artist)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if wanted != "*":
