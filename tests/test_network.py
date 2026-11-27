@@ -203,8 +203,10 @@ class TestGrabTrackLinks:
 
     def test_a_track_lands_in_its_producer_folder(self, tmp_path, monkeypatch, capsys):
         self._scrape_by_id(monkeypatch, {"1": LINK_TRACK})
+        (tmp_path / "uq").mkdir()
+        (tmp_path / "uq" / ".mel - old.mp3.trakid").write_text("1|x.mp3")  # left by an older version
         trakGrab.grab_track_links(["1"], tmp_path)
-        assert (tmp_path / "uq" / "mel - hit.mp3").exists()
+        assert [p.name for p in (tmp_path / "uq").iterdir()] == ["mel - hit.mp3"]
         out = capsys.readouterr().out
         assert "[1/1] mel - hit" in out
         assert "1 downloaded, 0 already existed, 0 failed" in out

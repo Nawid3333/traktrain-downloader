@@ -328,8 +328,22 @@ def download(url: str, dest: Path) -> bool:
     return False
 
 
-def grab(base_url: str, track: dict[str, Any], out_dir: Path, *, skip_existing: bool) -> str:
+def grab(
+    base_url: str,
+    track: dict[str, Any],
+    out_dir: Path,
+    *,
+    skip_existing: bool,
+    saved: set[Path] | None = None,
+) -> str:
     """Download one track. Returns 'downloaded', 'skipped' or 'failed'.
+
+    With skip_existing, a file of the same name counts as already downloaded
+    -- unless this very run saved it (``saved`` collects the run's files).
+    Then it belongs to another track that shares the title, and this one is
+    saved with a (1), (2), ... suffix. Nothing but the MP3 is written: a
+    re-run finds the plain name and the suffixed copies on disk and skips
+    them all.
 
     Ctrl+C during the transfer removes the partial file and re-raises, so an
     interrupted run never leaves a broken file behind that a later run would
@@ -346,23 +360,17 @@ def grab(base_url: str, track: dict[str, Any], out_dir: Path, *, skip_existing: 
     dest = out_dir / (sanitize(label) + ext)
 
     if dest.exists():
-        if skip_existing:
-            # The file may belong to a *different* track that merely shares
-            # the title. The bookkeeping marker distinguishes them: without
-            # one (pre-marker file, or hand-placed), skip conservatively.
-            if _same_track(dest, track.get("id"), src):
-                print("    already exists, skipped")
-                return "skipped"
-            print("    same name, different track - saving with a suffix")
-            dest = safe_filename(out_dir, label, ext)
-        else:
-            dest = safe_filename(out_dir, label, ext)
-            print(f"    exists, saving as {dest.name}")
+        if skip_existing and (saved is None or dest not in saved):
+            print("    already exists, skipped")
+            return "skipped"
+        dest = safe_filename(out_dir, label, ext)
+        print(f"    exists, saving as {dest.name}")
 
     print(f"    {url}")
     try:
         if download(url, dest):
-            _remember_track(dest, track.get("id"), src)
+            if saved is not None:
+                saved.add(dest)
             return "downloaded"
     except KeyboardInterrupt:
         dest.unlink(missing_ok=True)
@@ -371,32 +379,17 @@ def grab(base_url: str, track: dict[str, Any], out_dir: Path, *, skip_existing: 
     return "failed"
 
 
-def _marker_path(dest: Path) -> Path:
-    """Path of the invisible bookkeeping file for a downloaded track."""
-    return dest.with_name(f".{dest.name}.trakid")
+def remove_old_markers(folder: Path) -> None:
+    """Delete the .<file>.trakid files that versions up to 2.3 wrote.
 
-
-def _same_track(dest: Path, track_id: Any, src: str) -> bool:
-    """True when the file at dest was downloaded from this exact track."""
-    marker = _marker_path(dest)
-    if not marker.exists():
-        # No marker: predates bookkeeping, or hand-placed. Skipping is the
-        # conservative choice -- it preserves the never-overwrite promise.
-        return True
-    try:
-        return marker.read_text(encoding="utf-8").strip() == f"{track_id}|{src}"
-    except (OSError, UnicodeDecodeError):
-        # Unreadable marker: treat the file as its own thing rather than
-        # overwriting something we cannot vouch for.
-        return True
-
-
-def _remember_track(dest: Path, track_id: Any, src: str) -> None:
-    """Record which track a downloaded file came from (best effort)."""
-    try:
-        _marker_path(dest).write_text(f"{track_id}|{src}", encoding="utf-8")
-    except OSError:
-        pass  # bookkeeping must never break a successful download
+    They recorded which track each MP3 came from. Nothing reads them any
+    more, so they are only clutter next to the MP3s (best effort).
+    """
+    for marker in folder.glob(".*.trakid"):
+        try:
+            marker.unlink()
+        except OSError:
+            pass  # a locked leftover must never stop a download run
 
 
 def resolve_artist_input(raw: str) -> str:
@@ -458,6 +451,7 @@ def grab_track_links(track_ids: list[str], songs_root: Path) -> None:
     """
     stats = {"downloaded": 0, "skipped": 0, "failed": 0}
     folders: list[Path] = []
+    saved: set[Path] = set()
     for i, track_id in enumerate(track_ids, 1):
         prefix = f"[{i}/{len(track_ids)}]"
         try:
@@ -481,10 +475,11 @@ def grab_track_links(track_ids: list[str], songs_root: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         if out_dir not in folders:
             folders.append(out_dir)
+            remove_old_markers(out_dir)
         print(f"{prefix} {display_name(track)}")
-        # A link names one exact track (the ID marker confirms it), so a
-        # re-run skips it rather than saving a numbered copy of the same file.
-        stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
+        # Re-running a pasted list skips what is already there rather than
+        # saving numbered copies of the same files.
+        stats[grab(base_url, track, out_dir, skip_existing=True, saved=saved)] += 1
 
     print(f"\nDone! {stats['downloaded']} downloaded, {stats['skipped']} already existed, {stats['failed']} failed.")
     for folder in folders:
@@ -549,6 +544,7 @@ def main() -> None:
         # oddly at mkdir time.
         out_dir = songs_root / sanitize(artist)
         out_dir.mkdir(parents=True, exist_ok=True)
+        remove_old_markers(out_dir)
 
         if wanted != "*":
             track = pick_song(tracks, wanted)
@@ -560,9 +556,10 @@ def main() -> None:
             grab(base_url, track, out_dir, skip_existing=False)
         else:
             stats = {"downloaded": 0, "skipped": 0, "failed": 0}
+            saved: set[Path] = set()
             for i, track in enumerate(tracks, 1):
                 print(f"[{i}/{len(tracks)}] {display_name(track)}")
-                stats[grab(base_url, track, out_dir, skip_existing=True)] += 1
+                stats[grab(base_url, track, out_dir, skip_existing=True, saved=saved)] += 1
             print(
                 f"\nDone! {stats['downloaded']} downloaded, {stats['skipped']} already existed,"
                 f" {stats['failed']} failed."
