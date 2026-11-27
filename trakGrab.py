@@ -20,6 +20,8 @@ from typing import Any
 import httpx
 from lxml import html as lxml_html
 from lxml.etree import ParserError
+from mutagen import MutagenError
+from mutagen.id3 import APIC, ID3, TIT2, TPE1, ID3NoHeaderError
 
 TRAKTRAIN = "https://traktrain.com/"
 USER_AGENT = (
@@ -328,6 +330,62 @@ def download(url: str, dest: Path) -> bool:
     return False
 
 
+def cover_url(track: dict[str, Any]) -> str:
+    """The track's cover image: the full-size original, else the thumbnail."""
+    for key in ("imageOriginal", "image"):
+        value = str(track.get(key) or "").strip()
+        if value.startswith("http"):
+            return value
+    return ""
+
+
+def fetch_cover(url: str) -> tuple[bytes, str] | None:
+    """GET a cover image; return (bytes, MIME type), or None if unusable."""
+    if not url:
+        return None
+    try:
+        resp = get_client().get(url)
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    mime = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if not mime.startswith("image/") or not resp.content:
+        return None
+    return resp.content, mime
+
+
+def tag_mp3(dest: Path, track: dict[str, Any]) -> bool:
+    """Write title, artist and cover art into a fresh download's ID3 tag.
+
+    traktrain's previews carry only encoder tags, so players would show
+    nothing but the file name. Title and artist are the ones traktrain
+    shows; the cover is the track's image (front cover, as players expect).
+    Best effort: a missing image or an unwritable tag never fails the
+    download. Returns True when the file got its cover.
+    """
+    if dest.suffix.lower() != ".mp3":
+        return False  # ID3 is for MP3s; other formats keep their own tags
+    try:
+        try:
+            tags = ID3(dest)
+        except ID3NoHeaderError:
+            tags = ID3()
+        title = str(track.get("name") or "").strip()
+        artist = str(track.get("artist") or "").strip()
+        if title:
+            tags.setall("TIT2", [TIT2(encoding=3, text=title)])
+        if artist:
+            tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
+        cover = fetch_cover(cover_url(track))
+        if cover:
+            data, mime = cover
+            tags.setall("APIC", [APIC(encoding=3, mime=mime, type=3, desc="Cover", data=data)])
+        tags.save(dest)
+    except (MutagenError, OSError):
+        return False
+    return cover is not None
+
+
 def grab(
     base_url: str,
     track: dict[str, Any],
@@ -369,6 +427,9 @@ def grab(
     print(f"    {url}")
     try:
         if download(url, dest):
+            # Inside the try: a Ctrl+C while the tag is written removes the
+            # file, like one during the transfer, instead of leaving it torn.
+            print("    cover art added" if tag_mp3(dest, track) else "    no cover art available")
             if saved is not None:
                 saved.add(dest)
             return "downloaded"

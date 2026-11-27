@@ -20,6 +20,9 @@ resumable re-runs and Windows-safe filenames.
   more tracks than fit on one page are scraped completely
 - Downloads every free preview MP3 from traktrain's CDN (`*.cloudfront.net`),
   which only serves files with a proper `Referer` header
+- Tags every download like a normal MP3 downloader: title, artist and the
+  track's cover art (the image traktrain shows for it) are written into the
+  MP3's ID3 tag, so music players show more than the file name
 - Never overwrites: re-runs skip tracks that are already downloaded, so an
   interrupted or repeated run simply picks up where it left off. Failed
   downloads never leave a partial file behind, so a broken attempt cannot
@@ -114,6 +117,14 @@ HTTP is handled by `httpx` with HTTP/2 enabled (connection reuse across the
 profile pages and the CDN), matching the stack of the other Python tools in
 this account; `lxml` parses the markup.
 
+The previews traktrain serves carry only encoder tags. After each download
+the script writes the title and artist into the ID3 tag (via `mutagen`) and
+embeds the cover: the payload's `imageOriginal` image (the thumbnail `image`
+if there is no original), fetched from traktrain's image CDN and stored as
+the front cover. A missing image never fails a download. Files that were
+already downloaded are left as they are; delete them and run again to get
+the tags.
+
 ## Project layout
 
 ```text
@@ -121,7 +132,7 @@ traktrain-downloader/
 ├── trakGrab.py          # The whole tool: scraping, pagination, downloads
 ├── tests/               # Offline pytest suite (never touches the network)
 ├── pyproject.toml       # Packaging metadata; `pip install .` gives `trakgrab`
-├── requirements.txt     # Runtime dependencies (httpx[http2], lxml)
+├── requirements.txt     # Runtime dependencies (httpx[http2], lxml, mutagen)
 ├── LICENSE              # GPLv3
 ├── .github/workflows/   # CI, auto-release (Conventional Commits), release build
 ├── .gitignore

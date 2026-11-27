@@ -14,6 +14,8 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from mutagen import MutagenError
+from mutagen.id3 import ID3, TENC
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -419,6 +421,145 @@ class TestGrab:
         monkeypatch.setattr(trakGrab, "download", fake_download)
         assert trakGrab.grab("https://cdn/", self.TRACK, tmp_path, skip_existing=False) == "downloaded"
         assert (tmp_path / "mel - hit (1).mp3").exists()
+
+
+COVER_URL = "https://img.example/78923/cover.jpg"
+COVER_BYTES = b"\xff\xd8\xff\xe0fake-jpeg"
+
+
+class TestCoverUrl:
+    def test_the_original_image_is_preferred(self):
+        track = {"imageOriginal": COVER_URL, "image": "https://img.example/80x80/78923/cover.jpg"}
+        assert trakGrab.cover_url(track) == COVER_URL
+
+    def test_the_thumbnail_is_the_fallback(self):
+        assert trakGrab.cover_url({"imageOriginal": "", "image": COVER_URL}) == COVER_URL
+
+    def test_no_usable_image_gives_an_empty_string(self):
+        assert trakGrab.cover_url({"image": "/relative.jpg"}) == ""
+        assert trakGrab.cover_url({}) == ""
+
+
+class TestFetchCover:
+    def test_an_image_is_returned_with_its_mime_type(self, _fresh_client, respx_mock_scope):
+        respx_mock_scope.get(COVER_URL).respond(
+            200, content=COVER_BYTES, headers={"Content-Type": "image/JPEG; charset=binary"}
+        )
+        assert trakGrab.fetch_cover(COVER_URL) == (COVER_BYTES, "image/jpeg")
+
+    def test_no_url_means_no_request(self):
+        assert trakGrab.fetch_cover("") is None
+
+    def test_an_http_error_gives_none(self, _fresh_client, respx_mock_scope):
+        respx_mock_scope.get(COVER_URL).respond(404)
+        assert trakGrab.fetch_cover(COVER_URL) is None
+
+    def test_a_non_image_response_gives_none(self, _fresh_client, respx_mock_scope):
+        respx_mock_scope.get(COVER_URL).respond(200, text="<html>error</html>")
+        assert trakGrab.fetch_cover(COVER_URL) is None
+
+    def test_an_empty_image_gives_none(self, _fresh_client, respx_mock_scope):
+        respx_mock_scope.get(COVER_URL).respond(200, content=b"", headers={"Content-Type": "image/jpeg"})
+        assert trakGrab.fetch_cover(COVER_URL) is None
+
+
+class TestTagMp3:
+    """Tags are written for real with mutagen, into small stand-in files."""
+
+    TRACK = {"name": "hit ", "artist": "mel", "imageOriginal": COVER_URL}
+    AUDIO = b"\xff\xfb\x90\x00" + b"\x00" * 64  # stand-in for MPEG frames
+
+    @pytest.fixture(autouse=True)
+    def _cover_route(self, _fresh_client, respx_mock_scope):
+        self.route = respx_mock_scope.get(COVER_URL).respond(
+            200, content=COVER_BYTES, headers={"Content-Type": "image/jpeg"}
+        )
+
+    def _mp3(self, tmp_path, data=None):
+        dest = tmp_path / "mel - hit.mp3"
+        dest.write_bytes(self.AUDIO if data is None else data)
+        return dest
+
+    def test_title_artist_and_cover_are_written(self, tmp_path):
+        dest = self._mp3(tmp_path)
+        assert trakGrab.tag_mp3(dest, self.TRACK) is True
+        tags = ID3(dest)
+        assert str(tags["TIT2"]) == "hit"
+        assert str(tags["TPE1"]) == "mel"
+        (apic,) = tags.getall("APIC")
+        assert apic.data == COVER_BYTES
+        assert apic.mime == "image/jpeg"
+        assert apic.type == 3  # front cover
+        assert dest.read_bytes().endswith(self.AUDIO)  # the audio is untouched
+
+    def test_an_existing_tag_keeps_its_other_frames(self, tmp_path):
+        dest = self._mp3(tmp_path)
+        existing = ID3()
+        existing.add(TENC(encoding=3, text="LAME in FL Studio 2025"))
+        existing.save(dest)
+        trakGrab.tag_mp3(dest, self.TRACK)
+        tags = ID3(dest)
+        assert str(tags["TENC"]) == "LAME in FL Studio 2025"
+        assert len(tags.getall("APIC")) == 1
+
+    def test_without_a_cover_title_and_artist_are_still_written(self, tmp_path):
+        dest = self._mp3(tmp_path)
+        assert trakGrab.tag_mp3(dest, {"name": "hit", "artist": "mel"}) is False
+        tags = ID3(dest)
+        assert str(tags["TIT2"]) == "hit"
+        assert not tags.getall("APIC")
+
+    def test_a_track_without_names_writes_no_text_frames(self, tmp_path):
+        dest = self._mp3(tmp_path)
+        assert trakGrab.tag_mp3(dest, {"imageOriginal": COVER_URL}) is True
+        tags = ID3(dest)
+        assert not tags.getall("TIT2")
+        assert not tags.getall("TPE1")
+
+    def test_other_formats_are_left_alone(self, tmp_path):
+        dest = tmp_path / "mel - hit.wav"
+        dest.write_bytes(b"RIFF....WAVE")
+        assert trakGrab.tag_mp3(dest, self.TRACK) is False
+        assert dest.read_bytes() == b"RIFF....WAVE"
+        assert not self.route.called
+
+    def test_a_tag_error_is_swallowed(self, tmp_path, monkeypatch):
+        def broken(*_args):
+            raise MutagenError("unreadable tag")
+
+        monkeypatch.setattr(trakGrab, "ID3", broken)
+        dest = self._mp3(tmp_path)
+        assert trakGrab.tag_mp3(dest, self.TRACK) is False
+        assert dest.read_bytes() == self.AUDIO
+
+
+class TestGrabTagging:
+    """How grab() reports tagging, and Ctrl+C while the tag is written."""
+
+    TRACK = {"id": 1, "src": "78923/a.mp3", "name": "hit", "artist": "mel"}
+
+    @pytest.fixture(autouse=True)
+    def _fake_download(self, monkeypatch):
+        monkeypatch.setattr(trakGrab, "download", lambda _u, t: (t.write_bytes(b"x"), True)[1])
+
+    def test_a_cover_is_reported(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(trakGrab, "tag_mp3", lambda _d, _t: True)
+        trakGrab.grab("https://cdn/", dict(self.TRACK), tmp_path, skip_existing=True)
+        assert "cover art added" in capsys.readouterr().out
+
+    def test_a_missing_cover_is_reported(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(trakGrab, "tag_mp3", lambda _d, _t: False)
+        assert trakGrab.grab("https://cdn/", dict(self.TRACK), tmp_path, skip_existing=True) == "downloaded"
+        assert "no cover art available" in capsys.readouterr().out
+
+    def test_a_ctrl_c_while_tagging_removes_the_file(self, tmp_path, monkeypatch):
+        def interrupted(_dest, _track):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(trakGrab, "tag_mp3", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            trakGrab.grab("https://cdn/", dict(self.TRACK), tmp_path, skip_existing=True)
+        assert not (tmp_path / "mel - hit.mp3").exists()
 
 
 class TestMain:

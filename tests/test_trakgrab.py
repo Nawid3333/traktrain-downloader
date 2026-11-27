@@ -233,8 +233,9 @@ class TestSameTitle:
 
     def test_both_tracks_of_one_run_are_kept(self, tmp_path):
         assert self._run(tmp_path) == ["downloaded", "downloaded"]
-        assert (tmp_path / "mel - hit.mp3").read_bytes() == b"https://cdn/78923/a.mp3"
-        assert (tmp_path / "mel - hit (1).mp3").read_bytes() == b"https://cdn/78923/b.mp3"
+        # The stand-in audio is the URL; the title/artist tag sits in front.
+        assert (tmp_path / "mel - hit.mp3").read_bytes().endswith(b"https://cdn/78923/a.mp3")
+        assert (tmp_path / "mel - hit (1).mp3").read_bytes().endswith(b"https://cdn/78923/b.mp3")
 
     def test_a_rerun_adds_no_numbered_copies(self, tmp_path):
         """Up to 2.3, every re-run saved the second track again as (2), (3)..."""
